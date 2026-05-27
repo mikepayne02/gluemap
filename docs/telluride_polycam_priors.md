@@ -111,9 +111,9 @@ SALAD/Doppelgangers choose the graph for this repeated-staircase indoor scan.
 2. Run GlueMap with `--pair_graph_path ... --skip_doppelgangers`, so every
    edge in the graph is intentional and no edge is admitted only because DG
    relaxed to a weak threshold.
-3. Feed MapAnything depth and intrinsics, but keep `mapanything_use_polycam_pose`
-   off. The prior pose path copied the imperfect preseed instead of correcting
-   it.
+3. Feed MapAnything depth, intrinsics, and pose priors for the real run. The
+   no-pose branch collapsed on this sequence; pose priors keep the graph
+   metric while VGGSfM/GlueMap refinement supplies the correction signal.
 4. For coarse diagnostics use `--coarse_only --use_dummy_tracks` to inspect
    cameras quickly.
 5. For the real run, remove `--coarse_only` and do not pass
@@ -129,3 +129,75 @@ Implementation notes:
   score `1.0`.
 - `configs/telluride_polycam_mapanything_pairgraph.yaml` is the intended
   starting config for this branch.
+
+## Step-20 Pair Graph Result
+
+The first useful full-refinement run used:
+
+```text
+pair_graph_step20_seq8_spatial.json
+sample_frequency=20
+sequential_window=8
+spatial_radius=1.25
+spatial_max_neighbors=8
+skip_doppelgangers=true
+mapanything_use_polycam_depth=true
+mapanything_use_polycam_intrinsics=true
+mapanything_use_polycam_pose=true
+VGGSfM tracks enabled
+```
+
+Output:
+
+```text
+/workspace/results/gluemap_telluride_step20_pairgraph_seq8_spatial_pose_vggsfm_full/gluemap_aba
+```
+
+Logs showed:
+
+```text
+156 registered images
+14708 sparse points
+0 inconsistent rotation edges
+0 invalid relative-rotation pairs
+Similarity averaging converged
+Augmented BA converged
+Total pipeline time: 5627 s
+```
+
+After Sim3 fitting the optimized keyframe centers back to the reset-corrected
+Polycam frame:
+
+```text
+scale = 0.998581
+mean residual = 0.0308 m
+median residual = 0.0282 m
+p95 residual = 0.0595 m
+max residual = 0.0986 m
+```
+
+This run did not introduce a global scale collapse. Remaining quality issues
+should be evaluated as local geometry/point consistency problems, especially
+around entry/stair/basement overlap, rather than a gross trajectory failure.
+
+Remote setup notes:
+
+```text
+Base image used successfully:
+runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+Repo:
+/workspace/repos/gluemap
+
+Env:
+/workspace/venvs/gluemap_mm
+
+VGGSfM checkpoint:
+/workspace/repos/gluemap/checkpoints/vggsfm_v2_0_0_track_predictor.bin
+
+Kornia pin:
+pip install "kornia==0.6.12"
+
+Runtime PYTHONPATH:
+/workspace/repos/gluemap/thirdparty/mapanything
+```
