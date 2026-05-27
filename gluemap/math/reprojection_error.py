@@ -36,6 +36,38 @@ def _camera_mean_focal_length(camera: pycolmap.Camera) -> float:
     return float(np.mean(params[idxs]))
 
 
+def _camera_cam_from_img(camera: pycolmap.Camera, xy: np.ndarray) -> np.ndarray:
+    """Convert pixels to normalized camera coordinates without pycolmap logs.
+
+    Recent pycolmap versions emit C++ check-failure log lines when helper
+    properties touch multi-focal camera models. The Telluride data uses PINHOLE
+    / OPENCV-style intrinsics, so the fallback can safely use fx/fy/cx/cy
+    directly. For unsupported layouts, defer to pycolmap.
+    """
+    xy = np.asarray(xy, dtype=np.float64)
+    try:
+        focal_idxs = list(camera.focal_length_idxs())
+        pp_idxs = list(camera.principal_point_idxs())
+    except Exception:
+        return camera.cam_from_img(xy)
+
+    params = np.asarray(camera.params, dtype=np.float64)
+    if len(focal_idxs) == 1 and len(pp_idxs) >= 2:
+        fx = fy = params[focal_idxs[0]]
+    elif len(focal_idxs) >= 2 and len(pp_idxs) >= 2:
+        fx = params[focal_idxs[0]]
+        fy = params[focal_idxs[1]]
+    else:
+        return camera.cam_from_img(xy)
+
+    cx = params[pp_idxs[0]]
+    cy = params[pp_idxs[1]]
+    out = np.empty_like(xy, dtype=np.float64)
+    out[..., 0] = (xy[..., 0] - cx) / fx
+    out[..., 1] = (xy[..., 1] - cy) / fy
+    return out
+
+
 def compute_point_error(
     world_point: np.ndarray,
     R: np.ndarray,
@@ -73,7 +105,7 @@ def compute_point_error(
         if norm_3d < 1e-10:
             return float("inf")
         ray_3d = X_cam / norm_3d
-        ray_2d = camera.cam_from_img(observed)
+        ray_2d = _camera_cam_from_img(camera, observed)
         ray_obs = np.array([ray_2d[0], ray_2d[1], 1.0])
         ray_obs = ray_obs / np.linalg.norm(ray_obs)
         cos_angle = np.clip(np.dot(ray_3d, ray_obs), -1.0, 1.0)
@@ -128,7 +160,7 @@ def _compute_errors_batch(
             return errors
 
         rays_3d = X_proc[valid] / norms[valid, np.newaxis]
-        rays_2d = camera.cam_from_img(observed[valid])  # (M, 2)
+        rays_2d = _camera_cam_from_img(camera, observed[valid])  # (M, 2)
         rays_obs = np.column_stack([rays_2d, np.ones(rays_2d.shape[0])])
         rays_obs = rays_obs / np.linalg.norm(rays_obs, axis=1, keepdims=True)
         cos_angles = np.clip(np.sum(rays_3d * rays_obs, axis=1), -1.0, 1.0)
