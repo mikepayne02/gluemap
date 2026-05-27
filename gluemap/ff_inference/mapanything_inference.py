@@ -163,8 +163,12 @@ class MapAnythingLocalInference(LocalInference):
         depth_z = torch.stack(depths, dim=0).unsqueeze(0)  # (1, N, H, W)
         conf_z = torch.stack(confs, dim=0).unsqueeze(0)  # (1, N, H, W)
 
-        extrinsics = closed_form_pose_inverse(
-            torch.stack(extrinsics, dim=0)
+        # MapAnything returns OpenCV camera-to-world poses in an arbitrary
+        # world frame. GlueMap expects local star extrinsics relative to the
+        # first view, matching the Pi3 adapter convention.
+        camera_poses = torch.stack(extrinsics, dim=0)
+        extrinsics = (
+            closed_form_pose_inverse(camera_poses) @ camera_poses[:1]
         ).unsqueeze(0)
         intrinsics = torch.stack(intrinsics, dim=0).unsqueeze(0)
 
