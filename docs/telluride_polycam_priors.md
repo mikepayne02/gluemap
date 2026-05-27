@@ -180,6 +180,20 @@ This run did not introduce a global scale collapse. Remaining quality issues
 should be evaluated as local geometry/point consistency problems, especially
 around entry/stair/basement overlap, rather than a gross trajectory failure.
 
+Visual inspection caveat:
+
+The step-20 run is not a final-quality solve. It preserved metric scale and
+registered cleanly, but the basement remains yaw-rotated/off-axis relative to
+the main house. The sparse points are too coarse to prove geometry quality and
+include some outliers. Treat this as proof that the patched GlueMap pipeline
+runs end-to-end, not proof that the pose graph is solved.
+
+The next useful change is to weaken or segment the pose-prior influence around
+the ARKit reset/basement return, then add explicit RGB-D/visual loop
+constraints that can correct yaw and translation. Simply increasing keyframe
+density is unlikely to fix the basement if the same bad prior remains
+effectively rigid.
+
 Remote setup notes:
 
 ```text
