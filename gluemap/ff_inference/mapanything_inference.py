@@ -28,11 +28,18 @@ class MapAnythingLocalInference(LocalInference):
             polycam_intrinsics=batch.get("polycam_intrinsics"),
         )
 
+        use_amp = torch.cuda.is_available()
+        amp_dtype = (
+            torch.bfloat16
+            if use_amp and torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+
         predictions = self.model.infer(
             processed_views,
             memory_efficient_inference=False,
-            use_amp=True,
-            amp_dtype="bf16",
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
             apply_mask=True,
             mask_edges=True,
             apply_confidence_mask=False,
