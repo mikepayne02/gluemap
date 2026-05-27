@@ -1,0 +1,16 @@
+_base_: "telluride_polycam_mapanything.yaml"
+
+# Deterministic graph mode for Telluride. Generate this with:
+#   python scripts/build_polycam_pair_graph.py ...
+pair_graph_path: /workspace/results/gluemap_pair_graphs/pair_graph.json
+skip_doppelgangers: true
+
+# Keep MapAnything anchored by metric depth/intrinsics, but do not let the
+# imperfect reset-corrected Polycam trajectory become the solved camera path.
+mapanything_use_polycam_depth: true
+mapanything_use_polycam_intrinsics: true
+mapanything_use_polycam_pose: false
+
+# Use real VGGSfM tracks during refinement unless explicitly overridden with
+# --use_dummy_tracks for coarse diagnostics.
+use_dummy_tracks: false

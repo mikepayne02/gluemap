@@ -46,7 +46,13 @@ def demo_main():
         run_preprocessing_pipeline_multi(args, world_size, rank, datasets)
         dataset_pair = MultiSequencePairs(args, datasets)
     else:
-        (_, _), _ = run_preprocessing_pipeline(args, world_size, rank)
+        if getattr(args, "pair_graph_path", None):
+            logger.info(
+                "Using pair_graph_path=%s; skipping SALAD preprocessing",
+                args.pair_graph_path,
+            )
+        else:
+            (_, _), _ = run_preprocessing_pipeline(args, world_size, rank)
 
         if getattr(args, "is_sequential", False):
             dataset_pair = SequentialTwoViewDataset(args)

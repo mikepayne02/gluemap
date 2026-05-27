@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from gluemap.datasets.base import DemoBaseDataset
-from gluemap.datasets.utils import get_image_list
+from gluemap.datasets.utils import get_image_list, load_pair_graph
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,14 @@ class BaseTwoViewDataset(DemoBaseDataset):
                 preprocessing — used to map current ``self.images_list``
                 entries back to descriptor rows.
         """
+        pair_graph_path = getattr(args, "pair_graph_path", None)
+        if pair_graph_path:
+            self.pairs, sequential_edges = load_pair_graph(
+                pair_graph_path, self.images_list
+            )
+            self.sequential_edges = sequential_edges
+            return
+
         # TODO: extract the SALAD descriptors on the fly
 
         descriptors_path = os.path.join(

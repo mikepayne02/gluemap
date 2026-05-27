@@ -217,7 +217,11 @@ def load_all_models(
     if getattr(args, "direct_inference", False):
         keys = {chosen_model}
     else:
-        keys = {"salad", "dg", chosen_model}
+        keys = {chosen_model}
+        if not getattr(args, "skip_doppelgangers", False):
+            keys.add("dg")
+        if not getattr(args, "pair_graph_path", None):
+            keys.add("salad")
         if not getattr(args, "use_dummy_tracks", False):
             keys.add("vggsfm")
     return load_models(args, keys=keys)

@@ -99,3 +99,33 @@ fixes the hard reset with an adjacent transform and should not be treated as a
 truth source. GlueMap needs a better graph/constraint strategy before scaling:
 sequential and spatial edges from Polycam, vetted reset/stair loop edges, and
 avoidance of weak retrieval edges that only survive after threshold relaxation.
+
+## Next Reconstruction Plan
+
+Use GlueMap as the global geometry/BA engine, but stop letting
+SALAD/Doppelgangers choose the graph for this repeated-staircase indoor scan.
+
+1. Generate a deterministic pair graph from Polycam timing and camera centers:
+   dense sequential edges, nearby-in-space edges, and explicit vetted loop
+   edges around stair/reset regions.
+2. Run GlueMap with `--pair_graph_path ... --skip_doppelgangers`, so every
+   edge in the graph is intentional and no edge is admitted only because DG
+   relaxed to a weak threshold.
+3. Feed MapAnything depth and intrinsics, but keep `mapanything_use_polycam_pose`
+   off. The prior pose path copied the imperfect preseed instead of correcting
+   it.
+4. For coarse diagnostics use `--coarse_only --use_dummy_tracks` to inspect
+   cameras quickly.
+5. For the real run, remove `--coarse_only` and do not pass
+   `--use_dummy_tracks`; this lets VGGSfM run alongside MapAnything. VGGSfM
+   should help textured areas snap into place, while MapAnything's virtual
+   depth tracks carry low-texture walls.
+
+Implementation notes:
+
+- `scripts/build_polycam_pair_graph.py` writes the graph JSON.
+- `--pair_graph_path` bypasses SALAD descriptor loading in sequential mode.
+- `--skip_doppelgangers` skips DG scoring and assigns all supplied graph pairs
+  score `1.0`.
+- `configs/telluride_polycam_mapanything_pairgraph.yaml` is the intended
+  starting config for this branch.

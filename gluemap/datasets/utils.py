@@ -1,7 +1,10 @@
 import argparse
+import csv
 import glob
+import json
 import logging
 import os
+from pathlib import Path
 
 import faiss
 import numpy as np
@@ -210,3 +213,88 @@ def retrieve_global_neighbors(
     ]  # only keep valid pairs where the first index is less than the second
     pairs = np.unique(pairs, axis=0)  # remove duplicates
     return pairs
+
+
+def load_pair_graph(
+    pair_graph_path: str,
+    image_names: list[str],
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """Load a deterministic pair graph for a dataset.
+
+    The graph file can be:
+
+    - JSON list of pairs, e.g. ``[[0, 1], ["0000.jpg", "0040.jpg"]]``
+    - JSON object with ``pairs`` and optional ``sequential_edges``
+    - CSV/TXT lines with two columns separated by comma or whitespace
+
+    Pair endpoints may be local image indices or image basenames/relative
+    paths. Returned pairs are undirected, unique, and use local dataset
+    indices.
+    """
+    path = Path(pair_graph_path)
+    name_to_idx = {name: i for i, name in enumerate(image_names)}
+    base_to_idx = {Path(name).name: i for i, name in enumerate(image_names)}
+
+    def resolve(value) -> int:
+        if isinstance(value, int):
+            idx = value
+        elif isinstance(value, float) and value.is_integer():
+            idx = int(value)
+        elif isinstance(value, str):
+            token = value.strip()
+            if token.isdigit():
+                idx = int(token)
+            elif token in name_to_idx:
+                idx = name_to_idx[token]
+            elif Path(token).name in base_to_idx:
+                idx = base_to_idx[Path(token).name]
+            else:
+                raise KeyError(f"Unknown image in pair graph: {value!r}")
+        else:
+            raise TypeError(f"Unsupported pair endpoint: {value!r}")
+
+        if idx < 0 or idx >= len(image_names):
+            raise IndexError(f"Pair graph index out of range: {idx}")
+        return idx
+
+    def normalize(raw_pairs) -> list[tuple[int, int]]:
+        pairs_out = []
+        for raw in raw_pairs:
+            if isinstance(raw, dict):
+                a = raw.get("i", raw.get("image0", raw.get("src")))
+                b = raw.get("j", raw.get("image1", raw.get("dst")))
+            else:
+                a, b = raw[:2]
+            i, j = resolve(a), resolve(b)
+            if i == j:
+                continue
+            pairs_out.append((min(i, j), max(i, j)))
+        return sorted(set(pairs_out))
+
+    sequential_edges: list[tuple[int, int]] = []
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            pairs = normalize(data.get("pairs", []))
+            if "sequential_edges" in data:
+                sequential_edges = normalize(data["sequential_edges"])
+        else:
+            pairs = normalize(data)
+    else:
+        rows = []
+        with path.open(newline="") as f:
+            sample = f.read(2048)
+            f.seek(0)
+            delimiter = "," if "," in sample else None
+            if delimiter:
+                reader = csv.reader(f)
+                rows = [row for row in reader if row and not row[0].startswith("#")]
+            else:
+                rows = [
+                    line.split()
+                    for line in f
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
+        pairs = normalize(rows)
+
+    return np.asarray(pairs, dtype=int).reshape(-1, 2), sequential_edges

@@ -201,6 +201,15 @@ def get_args_parser() -> argparse.ArgumentParser:
         type=int,
         help="number of neighbors to establish",
     )
+    parser.add_argument(
+        "--pair_graph_path",
+        default=None,
+        type=str,
+        help=(
+            "optional JSON/CSV/TXT pair graph. When set, candidate pairs are "
+            "loaded from this file instead of SALAD/retrieval."
+        ),
+    )
 
     parser.add_argument(
         "--temp_path",

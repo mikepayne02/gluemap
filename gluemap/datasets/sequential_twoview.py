@@ -6,6 +6,7 @@ import torch
 from gluemap.datasets.twoview import BaseTwoViewDataset
 from gluemap.datasets.utils import (
     establish_neighbors_sequential,
+    load_pair_graph,
     retrieve_global_neighbors,
 )
 
@@ -63,6 +64,22 @@ class SequentialTwoViewDataset(BaseTwoViewDataset):
         Raises:
             FileNotFoundError: If ``salad_descriptors.pt`` is missing.
         """
+        pair_graph_path = getattr(args, "pair_graph_path", None)
+        if pair_graph_path:
+            self.pairs, sequential_edges = load_pair_graph(
+                pair_graph_path, self.images_list
+            )
+            if sequential_edges:
+                self.sequential_edges = sequential_edges
+            else:
+                max_seq = max(1, int(args.num_neighbors_sequential))
+                self.sequential_edges = [
+                    (int(i), int(j))
+                    for i, j in self.pairs
+                    if abs(int(i) - int(j)) <= max_seq
+                ]
+            return
+
         descriptors_path = os.path.join(
             args.curr_processed, "salad_descriptors.pt"
         )
