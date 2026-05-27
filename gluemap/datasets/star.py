@@ -1,10 +1,15 @@
 import argparse
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import networkx as nx
 import numpy as np
+import torch
+import torch.nn.functional as F
 from lightglue import ALIKED
+from PIL import Image
 from tqdm import tqdm
 
 from gluemap.datasets.base import DemoBaseDataset
@@ -14,6 +19,8 @@ from gluemap.estimators.feature_extraction import (
 from gluemap.utils.load_fn import calculate_image_shapes
 
 logger = logging.getLogger(__name__)
+
+ARKIT_TO_OPENCV = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
 
 
 class BaseStarDataset(DemoBaseDataset):
@@ -75,6 +82,98 @@ class BaseStarDataset(DemoBaseDataset):
         self.global_centers: list[np.ndarray] | None = None
         self.global_intrinsics: list[np.ndarray] | None = None
         self.intrinsics_mapping: dict[int, int] | None = None
+
+        self.polycam_priors_enabled = False
+        self.polycam_use_depth = False
+        self.polycam_use_pose = False
+        self.polycam_use_intrinsics = False
+        self.polycam_depth_unit_scale = 0.001
+        self.polycam_prior_root: Path | None = None
+        self.polycam_prior_records: list[dict] | None = None
+
+    def attach_polycam_priors(self, args: argparse.Namespace) -> None:
+        """Attach reset-aware Polycam priors for MapAnything stars.
+
+        ``transforms.json`` is treated as the only prior source. Its poses are
+        Nerfstudio/ARKit camera-to-world matrices, so they are converted to
+        OpenCV camera-to-world before being passed to MapAnything.
+        """
+        priors_path = getattr(args, "polycam_priors_path", None)
+        if not priors_path:
+            return
+
+        use_depth = bool(getattr(args, "mapanything_use_polycam_depth", False))
+        use_pose = bool(getattr(args, "mapanything_use_polycam_pose", False))
+        use_intrinsics = bool(
+            getattr(args, "mapanything_use_polycam_intrinsics", False)
+        )
+        if not (use_depth or use_pose or use_intrinsics):
+            return
+
+        priors_path = Path(priors_path)
+        prior_root = priors_path.parent
+        with priors_path.open() as f:
+            transforms = json.load(f)
+
+        frames_by_name = {
+            Path(frame["file_path"]).name: frame
+            for frame in transforms.get("frames", [])
+        }
+
+        records = []
+        for image_name in self.images_list:
+            frame = frames_by_name.get(Path(image_name).name)
+            if frame is None:
+                raise KeyError(
+                    f"No Polycam prior for image {image_name!r} in "
+                    f"{priors_path}"
+                )
+
+            K = np.array(
+                [
+                    [float(frame["fl_x"]), 0.0, float(frame["cx"])],
+                    [0.0, float(frame["fl_y"]), float(frame["cy"])],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+            c2w_arkit = np.array(frame["transform_matrix"], dtype=np.float32)
+            c2w_opencv = c2w_arkit @ ARKIT_TO_OPENCV
+
+            depth_path = (
+                prior_root / frame["depth_file_path"]
+                if "depth_file_path" in frame
+                else None
+            )
+            mask_path = (
+                prior_root / frame["mask_path"] if "mask_path" in frame else None
+            )
+            records.append(
+                {
+                    "intrinsics": K,
+                    "camera_pose": c2w_opencv,
+                    "depth_path": depth_path,
+                    "mask_path": mask_path,
+                }
+            )
+
+        self.polycam_priors_enabled = True
+        self.polycam_use_depth = use_depth
+        self.polycam_use_pose = use_pose
+        self.polycam_use_intrinsics = use_intrinsics
+        self.polycam_depth_unit_scale = float(
+            getattr(args, "polycam_depth_unit_scale", 0.001)
+        )
+        self.polycam_prior_root = prior_root
+        self.polycam_prior_records = records
+
+        logger.info(
+            "Attached Polycam priors from %s (depth=%s pose=%s intrinsics=%s)",
+            priors_path,
+            use_depth,
+            use_pose,
+            use_intrinsics,
+        )
 
     def __post_init__(self) -> None:
         """Build the star structure from ``self.valid_edges``.
@@ -363,4 +462,111 @@ class BaseStarDataset(DemoBaseDataset):
             batch["global_centers"] = np.array(global_centers)
             batch["global_intrinsics"] = np.array(global_intrinsics)
 
+        if self.polycam_priors_enabled:
+            batch.update(
+                self._load_polycam_star_priors(
+                    indexes.astype(np.int64),
+                    images.shape[-2:],
+                    images_change,
+                )
+            )
+
         return batch
+
+    def _load_polycam_star_priors(
+        self,
+        indexes: np.ndarray,
+        image_hw: tuple[int, int],
+        images_change: list[list[float]],
+    ) -> dict[str, torch.Tensor]:
+        if self.polycam_prior_records is None:
+            raise RuntimeError("Polycam priors requested before attach.")
+
+        H, W = int(image_hw[0]), int(image_hw[1])
+        output: dict[str, torch.Tensor] = {}
+
+        if self.polycam_use_intrinsics:
+            intrinsics = []
+            for local_i, image_idx in enumerate(indexes):
+                K = self.polycam_prior_records[int(image_idx)][
+                    "intrinsics"
+                ].copy()
+                sx, sy, x0, y0 = images_change[local_i]
+                K[0, 0] *= float(sx)
+                K[1, 1] *= float(sy)
+                K[0, 2] = K[0, 2] * float(sx) + float(x0)
+                K[1, 2] = K[1, 2] * float(sy) + float(y0)
+                intrinsics.append(K)
+            output["polycam_intrinsics"] = torch.from_numpy(
+                np.stack(intrinsics).astype(np.float32)
+            )
+
+        if self.polycam_use_pose:
+            poses = [
+                self.polycam_prior_records[int(image_idx)]["camera_pose"]
+                for image_idx in indexes
+            ]
+            output["polycam_camera_poses"] = torch.from_numpy(
+                np.stack(poses).astype(np.float32)
+            )
+
+        if self.polycam_use_depth:
+            depths = []
+            for local_i, image_idx in enumerate(indexes):
+                rec = self.polycam_prior_records[int(image_idx)]
+                depth_path = rec["depth_path"]
+                if depth_path is None or not depth_path.exists():
+                    raise FileNotFoundError(
+                        f"Missing depth prior for image index {int(image_idx)}"
+                    )
+
+                depth = np.array(Image.open(depth_path), dtype=np.float32)
+                depth *= self.polycam_depth_unit_scale
+                mask_path = rec["mask_path"]
+                if mask_path is not None and mask_path.exists():
+                    mask = np.array(Image.open(mask_path), dtype=np.uint8) > 0
+                else:
+                    mask = np.isfinite(depth) & (depth > 0.0)
+
+                depth_t = torch.from_numpy(depth)[None, None]
+                mask_t = torch.from_numpy(mask.astype(np.float32))[None, None]
+
+                src_h, src_w = depth.shape
+                sx, sy, x0, y0 = images_change[local_i]
+                new_w = max(1, int(round(src_w * float(sx))))
+                new_h = max(1, int(round(src_h * float(sy))))
+                depth_rs = F.interpolate(
+                    depth_t,
+                    size=(new_h, new_w),
+                    mode="nearest",
+                )[0, 0]
+                mask_rs = (
+                    F.interpolate(
+                        mask_t,
+                        size=(new_h, new_w),
+                        mode="nearest",
+                    )[0, 0]
+                    > 0.5
+                )
+
+                canvas = torch.zeros((H, W), dtype=torch.float32)
+                x_start = int(round(float(x0)))
+                y_start = int(round(float(y0)))
+                x_end = min(W, x_start + new_w)
+                y_end = min(H, y_start + new_h)
+                if x_start < W and y_start < H and x_end > 0 and y_end > 0:
+                    src_x0 = max(0, -x_start)
+                    src_y0 = max(0, -y_start)
+                    dst_x0 = max(0, x_start)
+                    dst_y0 = max(0, y_start)
+                    src_x1 = src_x0 + (x_end - dst_x0)
+                    src_y1 = src_y0 + (y_end - dst_y0)
+                    patch = depth_rs[src_y0:src_y1, src_x0:src_x1]
+                    patch_mask = mask_rs[src_y0:src_y1, src_x0:src_x1]
+                    patch = torch.where(patch_mask, patch, torch.zeros_like(patch))
+                    canvas[dst_y0:y_end, dst_x0:x_end] = patch
+                depths.append(canvas)
+
+            output["polycam_depth_z"] = torch.stack(depths, dim=0)
+
+        return output

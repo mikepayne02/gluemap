@@ -1,0 +1,27 @@
+_base_: "base.yaml"
+
+chosen_model: map_anything
+path_feedforward: facebook/map-anything
+
+images_path: /workspace/polycam_raw_adjacent/images
+write_path: /workspace/results/gluemap_telluride_mapanything_polycam
+polycam_priors_path: /workspace/polycam_raw_adjacent/transforms.json
+
+is_sequential: true
+sample_frequency: 1
+intrinsics_mode: PER_FOLDER
+camera_model: PINHOLE
+
+mapanything_use_polycam_depth: true
+mapanything_use_polycam_pose: false
+mapanything_use_polycam_intrinsics: true
+polycam_depth_unit_scale: 0.001
+
+num_neighbors: 80
+num_neighbors_sequential: 40
+valid_dg_threshold: 0.8
+
+batch_size: 12
+retrieval_batch_size: 32
+num_workers: 8
+force_load: true

@@ -151,6 +151,42 @@ def get_args_parser() -> argparse.ArgumentParser:
             "(one camera per image)"
         ),
     )
+    parser.add_argument(
+        "--polycam_priors_path",
+        default=None,
+        type=str,
+        help=(
+            "optional Nerfstudio-style Polycam transforms.json containing "
+            "RGB file_path, depth_file_path/mask_path, intrinsics, and poses"
+        ),
+    )
+    parser.add_argument(
+        "--mapanything_use_polycam_depth",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="feed Polycam depth_z priors into MapAnything local inference",
+    )
+    parser.add_argument(
+        "--mapanything_use_polycam_pose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "feed reset-corrected Polycam camera_poses priors into "
+            "MapAnything local inference"
+        ),
+    )
+    parser.add_argument(
+        "--mapanything_use_polycam_intrinsics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="feed Polycam intrinsics into MapAnything local inference",
+    )
+    parser.add_argument(
+        "--polycam_depth_unit_scale",
+        default=0.001,
+        type=float,
+        help="scale factor converting Polycam depth PNG values to meters",
+    )
 
     parser.add_argument(
         "--num_neighbors",

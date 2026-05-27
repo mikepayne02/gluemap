@@ -20,6 +20,11 @@ num_track_per_img: 1024
 max_num_tracks: null
 camera_model: SIMPLE_PINHOLE
 intrinsics_mode: SHARED
+polycam_priors_path: null
+mapanything_use_polycam_depth: false
+mapanything_use_polycam_pose: false
+mapanything_use_polycam_intrinsics: false
+polycam_depth_unit_scale: 0.001
 num_neighbors: 100
 num_neighbors_sequential: 30
 

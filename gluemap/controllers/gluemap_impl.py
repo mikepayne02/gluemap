@@ -107,6 +107,7 @@ class GluemapPipeline:
         # Step 2: Generate dataset from outputs
         t0 = time.perf_counter()
         dataset = run_star_collection(dataset_pair, global_outputs, args)
+        dataset.attach_polycam_priors(args)
         timing["dataset_generation"] = time.perf_counter() - t0
 
         # Step 3: Star inference

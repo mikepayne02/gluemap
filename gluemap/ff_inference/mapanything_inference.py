@@ -21,7 +21,12 @@ class MapAnythingLocalInference(LocalInference):
             and ``intrinsics`` of shape ``(1, N, 3, 3)``.
         """
         images = batch["images"].to(self.device).contiguous()
-        processed_views = self._compose_input_views(images)
+        processed_views = self._compose_input_views(
+            images,
+            polycam_depth_z=batch.get("polycam_depth_z"),
+            polycam_camera_poses=batch.get("polycam_camera_poses"),
+            polycam_intrinsics=batch.get("polycam_intrinsics"),
+        )
 
         predictions = self.model.infer(
             processed_views,
@@ -47,6 +52,9 @@ class MapAnythingLocalInference(LocalInference):
         global_rotations: torch.Tensor | None = None,
         global_centers: torch.Tensor | None = None,
         global_intrinsics: torch.Tensor | None = None,
+        polycam_depth_z: torch.Tensor | None = None,
+        polycam_camera_poses: torch.Tensor | None = None,
+        polycam_intrinsics: torch.Tensor | None = None,
     ) -> list[dict]:
         """Convert an image tensor into MapAnything's per-view input format.
 
@@ -64,6 +72,13 @@ class MapAnythingLocalInference(LocalInference):
             global_centers: Optional camera centers of shape ``(B, N, 3)``.
                 Required together with ``global_rotations``.
             global_intrinsics: Optional intrinsics of shape ``(B, N, 3, 3)``.
+            polycam_depth_z: Optional metric depth priors of shape
+                ``(B, N, H, W)`` or ``(N, H, W)`` in the same resized/padded
+                image frame as ``images``.
+            polycam_camera_poses: Optional OpenCV camera-to-world pose priors
+                of shape ``(B, N, 4, 4)`` or ``(N, 4, 4)``.
+            polycam_intrinsics: Optional intrinsics of shape ``(B, N, 3, 3)``
+                or ``(N, 3, 3)`` in the same resized/padded image frame.
 
         Returns:
             List of view dicts pre-processed for MapAnything's ``infer`` API.
@@ -72,17 +87,34 @@ class MapAnythingLocalInference(LocalInference):
 
         if images.ndim == 4:
             images = images.unsqueeze(0)
+        if polycam_depth_z is not None and polycam_depth_z.ndim == 3:
+            polycam_depth_z = polycam_depth_z.unsqueeze(0)
+        if polycam_camera_poses is not None and polycam_camera_poses.ndim == 3:
+            polycam_camera_poses = polycam_camera_poses.unsqueeze(0)
+        if polycam_intrinsics is not None and polycam_intrinsics.ndim == 3:
+            polycam_intrinsics = polycam_intrinsics.unsqueeze(0)
+
         input_views = []
         for i in range(images.shape[1]):
             view = {"img": images[0, i].permute(1, 2, 0)}  # (H, W, 3)
-            if global_rotations is not None:
+
+            if polycam_camera_poses is not None:
+                view["camera_poses"] = polycam_camera_poses[0, i]
+                view["is_metric_scale"] = True
+            elif global_rotations is not None:
                 camera_pose = np.eye(4, dtype=np.float32)
                 camera_pose[:3, :3] = global_rotations[0, i].T
                 camera_pose[:3, 3] = global_centers[0, i]
                 view["camera_poses"] = camera_pose
 
-            if global_intrinsics is not None:
+            if polycam_intrinsics is not None:
+                view["intrinsics"] = polycam_intrinsics[0, i]
+            elif global_intrinsics is not None:
                 view["intrinsics"] = global_intrinsics[0, i]
+
+            if polycam_depth_z is not None:
+                view["depth_z"] = polycam_depth_z[0, i]
+                view["is_metric_scale"] = True
 
             input_views.append(view)
 
