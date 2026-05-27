@@ -18,6 +18,24 @@ class ReprojectionErrorType(Enum):
     ANGULAR = "angular"
 
 
+def _camera_mean_focal_length(camera: pycolmap.Camera) -> float:
+    """Return a scalar focal length for normalized reprojection thresholds."""
+    try:
+        return float(camera.focal_length)
+    except Exception:
+        pass
+
+    try:
+        idxs = list(camera.focal_length_idxs())
+    except Exception:
+        idxs = [0]
+
+    params = np.asarray(camera.params, dtype=np.float64)
+    if len(idxs) == 0:
+        idxs = [0]
+    return float(np.mean(params[idxs]))
+
+
 def compute_point_error(
     world_point: np.ndarray,
     R: np.ndarray,
@@ -69,7 +87,7 @@ def compute_point_error(
             + (projected[1] - observed[1]) ** 2
         )
         if error_type == ReprojectionErrorType.NORMALIZED:
-            return pixel_error / camera.focal_length
+            return pixel_error / _camera_mean_focal_length(camera)
         return pixel_error
 
 
@@ -123,7 +141,7 @@ def _compute_errors_batch(
         projected = camera.img_from_cam(X_proc[valid])  # (M, 2)
         pixel_errors = np.linalg.norm(projected - observed[valid], axis=1)
         if error_type == ReprojectionErrorType.NORMALIZED:
-            pixel_errors = pixel_errors / camera.focal_length
+            pixel_errors = pixel_errors / _camera_mean_focal_length(camera)
         errors[valid] = pixel_errors
 
     return errors
