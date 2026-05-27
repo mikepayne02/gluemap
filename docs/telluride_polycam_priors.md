@@ -215,3 +215,90 @@ pip install "kornia==0.6.12"
 Runtime PYTHONPATH:
 /workspace/repos/gluemap/thirdparty/mapanything
 ```
+
+## 2026-05-27 v31d Prior Experiment
+
+The raw reset-corrected Polycam prior was not a good enough source for
+GlueMap because it preserved the basement yaw/entryway problem. The next
+experiment used the best available local RGB-D posegraph prior:
+
+```text
+/workspace/telluride_rgbd/polycam_raw_adjacent/transforms_pose_v31d.json
+```
+
+Run shape:
+
+```text
+pair_graph_v31d_step20_seq8_spatial.json
+sample_frequency=20
+sequential_window=8
+spatial_radius=1.25
+spatial_max_neighbors=8
+skip_doppelgangers=true
+mapanything_use_polycam_depth=true
+mapanything_use_polycam_intrinsics=true
+mapanything_use_polycam_pose=true
+VGGSfM tracks enabled
+```
+
+Pair graph:
+
+```text
+images = 156
+pairs = 1284
+sequential pairs = 1212
+```
+
+Output:
+
+```text
+/workspace/results/gluemap_telluride_v31d_step20_pairgraph_seq8_spatial_pose_vggsfm_full/gluemap_aba
+```
+
+Important log details:
+
+```text
+156 registered images
+13253 sparse points after final filtering
+1 inconsistent edge filtered
+746 / 2568 edges filtered by rotation error
+Similarity averaging converged
+BA pass 1: initial cost 3.316728e+05, final cost 2.748723e+05, termination NO_CONVERGENCE
+BA pass 2: initial cost 1.319573e+05, final cost 1.194665e+05, termination NO_CONVERGENCE
+Total pipeline time: 3811.81 s
+```
+
+The Ceres termination was not ideal, but the run completed and wrote a valid
+COLMAP reconstruction.
+
+Local inspection bundle:
+
+```text
+/home/michael/telluride/downloads/gluemap_polycam_init/gluemap_v31d_step20_pairgraph_seq8_spatial_pose_vggsfm_full
+```
+
+Analyzer:
+
+```text
+scripts/analyze_polycam_gluemap_result.py
+```
+
+After Sim3 fitting the optimized keyframe centers back to the v31d frame:
+
+```text
+scale = 0.95209216
+mean residual = 0.0304 m
+median residual = 0.0278 m
+p95 residual = 0.0600 m
+max residual = 0.1006 m
+```
+
+Interpretation:
+
+The v31d run is not merely copying the input trajectory. The Sim3 scale needed
+to return to v31d is about 0.952, while the residuals are still low after
+fitting. That means GlueMap changed the sampled reconstruction but stayed close
+to the prior shape. Visual inspection should decide whether this improves the
+problem areas enough to justify a denser step-10 or step-5 run. If the
+basement/entry overlap remains wrong, changing pose-prior strength or graph
+constraints is more important than only increasing keyframe density.
