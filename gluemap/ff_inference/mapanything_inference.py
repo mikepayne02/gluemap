@@ -107,7 +107,7 @@ class MapAnythingLocalInference(LocalInference):
 
             if polycam_camera_poses is not None:
                 view["camera_poses"] = polycam_camera_poses[0, i]
-                view["is_metric_scale"] = True
+                view["is_metric_scale"] = torch.ones(1, dtype=torch.bool)
             elif global_rotations is not None:
                 camera_pose = np.eye(4, dtype=np.float32)
                 camera_pose[:3, :3] = global_rotations[0, i].T
@@ -121,7 +121,7 @@ class MapAnythingLocalInference(LocalInference):
 
             if polycam_depth_z is not None:
                 view["depth_z"] = polycam_depth_z[0, i]
-                view["is_metric_scale"] = True
+                view["is_metric_scale"] = torch.ones(1, dtype=torch.bool)
 
             input_views.append(view)
 
