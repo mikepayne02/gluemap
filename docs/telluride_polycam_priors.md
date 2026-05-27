@@ -62,3 +62,40 @@ The initial config uses:
 For the current flat image folder, `PER_FOLDER` behaves like `SHARED`. If the
 dataset is later split into physical subfolders, `PER_FOLDER` avoids mixing
 intrinsic buckets across folders.
+
+## 2026-05-27 GlueMap Smoke Findings
+
+The first MapAnything adapter emitted absolute inverse poses for each star:
+
+```python
+extrinsics = inv(camera_poses)
+```
+
+That was wrong for GlueMap. The Pi3 adapter emits first-view-relative star
+extrinsics:
+
+```python
+extrinsics = inv(camera_poses) @ camera_poses[:, :1]
+```
+
+The MapAnything adapter now matches that convention.
+
+Step-40 smoke diagnostics:
+
+- Depth/intrinsics-only after the fix is still not usable. The graph relaxes
+  Doppelgangers filtering to `0.50`, filters most edges, and free similarity
+  averaging is unstable/collapsed. This points at the star graph being too weak
+  or ambiguous for this indoor/staircase sequence.
+- Pose-prior mode after the fix converges cleanly, but it follows
+  `polycam_raw_adjacent/transforms.json` almost exactly. The exported coarse
+  camera centers differ from the Polycam preseed by only ~3.4 cm median and
+  ~8.5 cm p90 after alignment.
+- Therefore, pose-prior mode is not currently correcting the basement/entry
+  errors. It is mostly preserving the adjacent-reset Polycam trajectory.
+
+Conclusion: the raw RGB/depth/intrinsics look sane, but
+`polycam_raw_adjacent/transforms.json` is not a golden trajectory. It only
+fixes the hard reset with an adjacent transform and should not be treated as a
+truth source. GlueMap needs a better graph/constraint strategy before scaling:
+sequential and spatial edges from Polycam, vetted reset/stair loop edges, and
+avoidance of weak retrieval edges that only survive after threshold relaxation.
