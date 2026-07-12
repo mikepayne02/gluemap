@@ -88,7 +88,7 @@ def _load_view(
         "img": rgb,
         "intrinsics": intrinsics.astype(np.float32),
         "depth_z": measured_depth,
-        "is_metric_scale": True,
+        "is_metric_scale": torch.tensor([True], dtype=torch.bool),
         "idx": [int(frame["sequence_index"])],
         "instance": [frame["frame_id"]],
     }

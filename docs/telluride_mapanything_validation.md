@@ -56,6 +56,7 @@ python scripts/run_polycam_mapanything_group.py \
   --source-root /workspace/telluride/polycam_raw \
   --pose-mode corrected \
   --min-confidence 255 \
+  --minibatch-size 1 \
   --orientation upright_cw
 ```
 
@@ -70,14 +71,35 @@ python scripts/run_polycam_mapanything_group.py \
   --source-root /workspace/telluride/polycam_raw \
   --pose-mode none \
   --min-confidence 255 \
+  --minibatch-size 1 \
   --orientation upright_cw
 ```
 
 Both runs retain metric depth and intrinsics. The only intended difference is
 whether corrected ARKit camera poses and pose scale are supplied.
 
-The runner enables memory-efficient inference. Add `--minibatch-size` only if
-the selected GPU needs an explicit dense-head minibatch limit.
+The runner enables memory-efficient inference. Minibatch size 1 matches the
+lowest-memory configuration in MapAnything's published profiling.
+
+## First bridge result
+
+The first A40 run used MapAnything v1.1.1, BF16, and dense-head minibatch size
+1. Each 64-view inference took about 71 seconds. Both outputs retained metric
+depth and intrinsics; only pose conditioning differed.
+
+| Measurement | Corrected poses | No poses |
+| --- | ---: | ---: |
+| Camera distance, frames 2379-3034 | 1.542 m | 0.403 m |
+| Camera distance, frames 2380-3034 | 1.563 m | 0.422 m |
+| Mean LiDAR depth error | 0.0136 m | 0.0368 m |
+| Mean median relative LiDAR error | 0.0079 | 0.0247 |
+| Mean metric scaling factor | 1.248 | 1.441 |
+
+The corrected-pose run preserves almost all of the known 1.6 m staircase
+trajectory split. Omitting poses removes roughly 1.15 m of that discrepancy,
+while retaining mean agreement with confidence-255 LiDAR samples within 3.7
+cm. Visual comparison of the exported clouds remains required before choosing
+the bridge-group policy.
 
 ## Acceptance criteria
 
