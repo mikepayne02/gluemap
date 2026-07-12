@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "status": "accepted_rigid_initialization_with_residual_drift",
+  "source": "manual CloudCompare alignment supplied by the user",
+  "reset_after_sequence_index": 2197,
+  "post_segment_starts_at_sequence_index": 2198,
+  "transform_direction": "raw post-reset world to pre-reset world",
+  "world_up_axis": "+Y",
+  "scale_fixed": true,
+  "transform_post_to_pre": [
+    [0.990410, 0.0, -0.138157, 8.093066],
+    [0.0, 1.0, 0.0, 0.821993],
+    [0.138157, 0.0, 0.990410, -3.931697],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "confidence": {
+    "rotation_and_gravity": "high",
+    "translation_z": "higher",
+    "translation_x_y": "lower because of trajectory drift"
+  },
+  "known_residuals": [
+    "Basement staircase visits remain displaced by approximately 3-4 feet.",
+    "Some walls intersect near the drifted region.",
+    "The residual is internal trajectory drift and cannot be removed by one rigid reset transform."
+  ]
+}

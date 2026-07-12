@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -439,6 +440,86 @@ def load_polycam_manifest(path: str | Path) -> dict[str, Any]:
     return manifest
 
 
+def apply_reset_transform(
+    manifest: dict[str, Any],
+    transform_post_to_pre: np.ndarray,
+    *,
+    reset_after_sequence_index: int,
+) -> dict[str, Any]:
+    """Add corrected poses by rigidly transforming the post-reset segment."""
+    transform = np.asarray(transform_post_to_pre, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("Reset transform must be a finite 4x4 matrix")
+    rotation = transform[:3, :3]
+    if not np.allclose(transform[3], [0.0, 0.0, 0.0, 1.0], atol=1e-7):
+        raise ValueError("Reset transform must have a homogeneous bottom row")
+    if not np.allclose(rotation @ rotation.T, np.eye(3), atol=2e-5):
+        raise ValueError("Reset transform rotation is not orthonormal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=2e-5):
+        raise ValueError("Reset transform must preserve orientation and scale")
+
+    result = deepcopy(manifest)
+    frames = result["frames"]
+    if not 0 <= reset_after_sequence_index < len(frames) - 1:
+        raise ValueError("reset_after_sequence_index is outside the manifest")
+
+    corrected_centers = []
+    for frame in frames:
+        index = int(frame["sequence_index"])
+        raw_arkit = np.asarray(frame["raw_c2w_arkit"], dtype=np.float64)
+        raw_opencv = np.asarray(frame["raw_c2w_opencv"], dtype=np.float64)
+        if index > reset_after_sequence_index:
+            corrected_arkit = transform @ raw_arkit
+            corrected_opencv = transform @ raw_opencv
+        else:
+            corrected_arkit = raw_arkit
+            corrected_opencv = raw_opencv
+        frame["corrected_c2w_arkit"] = corrected_arkit.tolist()
+        frame["corrected_c2w_opencv"] = corrected_opencv.tolist()
+        corrected_centers.append(corrected_arkit[:3, 3])
+
+    centers = np.asarray(corrected_centers)
+    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+    result["pose_correction"] = {
+        "type": "rigid_post_reset_segment",
+        "reset_after_sequence_index": reset_after_sequence_index,
+        "transform_post_to_pre": transform.tolist(),
+        "rotation_determinant": float(np.linalg.det(rotation)),
+        "rotation_orthogonality_error": float(
+            np.linalg.norm(rotation @ rotation.T - np.eye(3))
+        ),
+        "corrected_boundary_step_m": float(steps[reset_after_sequence_index]),
+        "corrected_step_m": _percentiles(steps),
+    }
+    return result
+
+
+def write_corrected_polycam_manifest(
+    manifest_path: str | Path,
+    transform_path: str | Path,
+    output_path: str | Path,
+) -> Path:
+    """Apply a reset-transform JSON file and write a corrected manifest."""
+    manifest = load_polycam_manifest(manifest_path)
+    transform_data = json.loads(
+        Path(transform_path).read_text(encoding="utf-8")
+    )
+    corrected = apply_reset_transform(
+        manifest,
+        np.asarray(transform_data["transform_post_to_pre"], dtype=np.float64),
+        reset_after_sequence_index=int(
+            transform_data["reset_after_sequence_index"]
+        ),
+    )
+    corrected["pose_correction"]["source"] = transform_data
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(corrected, indent=2) + "\n", encoding="utf-8"
+    )
+    return output_path
+
+
 def frame_world_points(
     frame: dict[str, Any],
     source_root: str | Path,
@@ -447,6 +528,7 @@ def frame_world_points(
     min_confidence: int = 255,
     min_depth_m: float = 0.08,
     max_depth_m: float = 6.0,
+    pose_key: str = "raw_c2w_opencv",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Project one manifest frame's measured depth and RGB into world space."""
     if pixel_step <= 0:
@@ -485,7 +567,9 @@ def frame_world_points(
         ],
         axis=1,
     )
-    c2w = np.asarray(frame["raw_c2w_opencv"], dtype=np.float64)
+    if pose_key not in frame:
+        raise PolycamDatasetError(f"Frame does not contain pose {pose_key!r}")
+    c2w = np.asarray(frame[pose_key], dtype=np.float64)
     points_world = (points_camera @ c2w[:3, :3].T + c2w[:3, 3]).astype(
         np.float32
     )

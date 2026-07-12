@@ -7,6 +7,7 @@ from PIL import Image
 
 from gluemap.datasets.polycam import (
     PolycamDatasetError,
+    apply_reset_transform,
     arkit_c2w_to_opencv,
     backproject_z_depth,
     build_polycam_manifest,
@@ -139,3 +140,32 @@ def test_frame_world_points_stride_preserves_original_pixel_coordinates(
     # full-resolution pixels. Back-projection must not renumber them to a 2x2
     # image coordinate system.
     np.testing.assert_allclose(strided_points, dense_points[[0, 2, 8, 10]])
+
+
+def test_apply_reset_transform_only_changes_post_segment(tmp_path: Path):
+    _write_frame(tmp_path, 100, (0.0, 0.0, 0.0))
+    _write_frame(tmp_path, 200, (0.2, 0.0, 0.0))
+    _write_frame(tmp_path, 300, (5.0, 0.0, 0.0))
+    manifest, _ = build_polycam_manifest(tmp_path, reset_jump_threshold_m=2.0)
+    transform = np.eye(4)
+    transform[:3, 3] = [1.0, 2.0, 3.0]
+    corrected = apply_reset_transform(
+        manifest, transform, reset_after_sequence_index=1
+    )
+    np.testing.assert_allclose(
+        corrected["frames"][1]["corrected_c2w_arkit"],
+        manifest["frames"][1]["raw_c2w_arkit"],
+    )
+    post = np.asarray(corrected["frames"][2]["corrected_c2w_arkit"])
+    np.testing.assert_allclose(post[:3, 3], [6.0, 2.0, 3.0])
+    assert "corrected_c2w_arkit" not in manifest["frames"][2]
+
+
+def test_apply_reset_transform_rejects_scale(tmp_path: Path):
+    _write_frame(tmp_path, 100, (0.0, 0.0, 0.0))
+    _write_frame(tmp_path, 200, (0.2, 0.0, 0.0))
+    manifest, _ = build_polycam_manifest(tmp_path)
+    transform = np.eye(4)
+    transform[0, 0] = 1.1
+    with pytest.raises(ValueError, match="orthonormal"):
+        apply_reset_transform(manifest, transform, reset_after_sequence_index=0)

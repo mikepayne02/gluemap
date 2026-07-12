@@ -119,17 +119,34 @@ def main() -> None:
     parser.add_argument("--min-confidence", type=int, default=255)
     parser.add_argument("--max-depth-m", type=float, default=6.0)
     parser.add_argument("--overlay-count", type=int, default=24)
+    parser.add_argument(
+        "--pose-prefix",
+        choices=["raw", "corrected"],
+        default="raw",
+        help="Manifest pose fields used for projection (default: raw).",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Output filename prefix (default: the pose prefix).",
+    )
     args = parser.parse_args()
 
     manifest = load_polycam_manifest(args.manifest)
     source_root = Path(manifest["source_root"])
     output = args.output_directory.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    label = args.label or args.pose_prefix
+    pose_key_opencv = f"{args.pose_prefix}_c2w_opencv"
+    pose_key_arkit = f"{args.pose_prefix}_c2w_arkit"
     segments = sorted({frame["reset_segment"] for frame in manifest["frames"]})
     writers = {
-        segment: StreamingPlyWriter(output / f"raw_segment_{segment}.ply")
+        segment: StreamingPlyWriter(output / f"{label}_segment_{segment}.ply")
         for segment in segments
     }
+    combined_writer = StreamingPlyWriter(
+        output / f"{label}_combined_segments.ply"
+    )
     frames_with_points = {segment: 0 for segment in segments}
     try:
         for frame in manifest["frames"]:
@@ -139,17 +156,28 @@ def main() -> None:
                 pixel_step=args.pixel_step,
                 min_confidence=args.min_confidence,
                 max_depth_m=args.max_depth_m,
+                pose_key=pose_key_opencv,
             )
             if len(points):
                 segment = frame["reset_segment"]
                 writers[segment].write(points, colors)
+                segment_color = (
+                    np.array([40, 210, 255], dtype=np.uint8)
+                    if segment == 0
+                    else np.array([255, 60, 190], dtype=np.uint8)
+                )
+                combined_writer.write(
+                    points,
+                    np.broadcast_to(segment_color, colors.shape),
+                )
                 frames_with_points[segment] += 1
     finally:
         for writer in writers.values():
             writer.close()
+        combined_writer.close()
 
     centers = np.asarray(
-        [frame["raw_c2w_arkit"] for frame in manifest["frames"]],
+        [frame[pose_key_arkit] for frame in manifest["frames"]],
         dtype=np.float64,
     )[:, :3, 3]
     segment_colors = np.asarray(
@@ -159,7 +187,7 @@ def main() -> None:
         ],
         dtype=np.uint8,
     )
-    centers_writer = StreamingPlyWriter(output / "raw_camera_centers.ply")
+    centers_writer = StreamingPlyWriter(output / f"{label}_camera_centers.ply")
     centers_writer.write(centers.astype(np.float32), segment_colors)
     centers_writer.close()
 
@@ -183,6 +211,7 @@ def main() -> None:
         "pixel_step": args.pixel_step,
         "min_confidence": args.min_confidence,
         "max_depth_m": args.max_depth_m,
+        "pose_prefix": args.pose_prefix,
         "segments": {
             str(segment): {
                 "frames_with_points": frames_with_points[segment],
@@ -191,6 +220,7 @@ def main() -> None:
             }
             for segment in segments
         },
+        "combined_segments_ply": str(combined_writer.path),
         "camera_centers_ply": str(centers_writer.path),
         "overlay_indices": overlay_indices,
     }

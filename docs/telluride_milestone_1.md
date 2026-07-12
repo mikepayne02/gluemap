@@ -88,3 +88,54 @@ cyan for segment 0 and magenta for segment 1. Every input frame is processed;
 `summary.json` reports how many contributed depth points. Set `--pixel-step 1`
 for full-resolution diagnostic clouds after the preview conventions are
 accepted.
+
+## Accepted rigid reset initialization
+
+The user manually aligned the two raw segments in CloudCompare while preserving
+ARKit +Y gravity and unit scale. The accepted raw-post-world to pre-world rigid
+initialization is:
+
+```text
+0.990410  0.000000 -0.138157  8.093066
+0.000000  1.000000  0.000000  0.821993
+0.138157  0.000000  0.990410 -3.931697
+0.000000  0.000000  0.000000  1.000000
+```
+
+This matrix fixes the coordinate-system discontinuity but intentionally does
+not deform either segment. Rotation/gravity and Z alignment are considered more
+reliable than X/Y because residual trajectory drift remains.
+
+Generate corrected poses and aligned diagnostics with:
+
+```bash
+PYTHONPATH=. python scripts/apply_polycam_reset_transform.py \
+  dataset_audit/manifest.json \
+  dataset_audit/reset_transform.json \
+  dataset_audit/manifest_corrected.json
+
+PYTHONPATH=. python scripts/project_polycam_diagnostics.py \
+  dataset_audit/manifest_corrected.json \
+  reset_diagnostics/aligned \
+  --pose-prefix corrected \
+  --label aligned
+```
+
+### Residual-drift evidence
+
+Pose-proximity proposals plus visual inspection established:
+
+- Frames around 2232 and 3088 revisit the same basement lower-landing area and
+  have camera centers within about 0.08 m after rigid reset alignment.
+- Frames 2379-2380 and 3034 unmistakably observe the same basement staircase,
+  but their corrected camera centers remain about 1.58-1.60 m apart.
+- The staircase mismatch is internal drift within reset segment 1. A single
+  reset matrix cannot remove it because both visits receive the same transform.
+- A very close pose proposal around frames 790 and 2217 was not a valid visual
+  correspondence. This confirms that pose/frustum proximity alone cannot add a
+  nonlocal graph edge through walls or repeated structure.
+
+The verified staircase ranges should seed a MapAnything comparison with and
+without pose conditioning. Depth and intrinsics remain enabled in both cases.
+The predicted local geometry becomes a loop measurement for global
+optimization; it must not directly overwrite the corrected ARKit trajectory.
