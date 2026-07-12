@@ -64,6 +64,8 @@ def main() -> None:
         num_workers=args_cli.num_workers,
         distributed=False,
         use_dummy_tracks=True,
+        resume_partial=True,
+        checkpoint_every=100,
         force_load=args_cli.full_refinement,
         rerun_from=None,
         coarse_only=not args_cli.full_refinement,

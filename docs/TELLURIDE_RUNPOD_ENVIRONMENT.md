@@ -175,6 +175,10 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   `/workspace/telluride/results/native_closet_1500_2100`. It may be resumed
   from `star_result.pth`; full refinement does not require rerunning neural
   inference.
+- Native star inference writes an atomic `star_result.pth.partial` every 100
+  stars. A restarted native runner skips completed star indices and removes
+  the partial only after the final `star_result.pth` is safely written. Resume
+  is intentionally limited to the single-process path used on the A40.
 
 Do not reintroduce the rejected per-camera translation optimizer, selective
 camera anchoring, or independent per-star transforms. Those experiments

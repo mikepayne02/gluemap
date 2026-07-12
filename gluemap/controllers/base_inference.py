@@ -123,20 +123,27 @@ class BaseInferencePipeline(abc.ABC):
 
     # --------------------------------------------------------------- skeleton
 
-    def _make_dataloader(self, dataset) -> torch.utils.data.DataLoader:
+    def _make_dataloader(
+        self, dataset, indices: list[int] | None = None
+    ) -> torch.utils.data.DataLoader:
         """Build a (distributed when applicable) DataLoader."""
+        data_source = (
+            torch.utils.data.Subset(dataset, indices)
+            if indices is not None
+            else dataset
+        )
         if self.args.distributed:
             sampler = DistributedSampler(
-                dataset,
+                data_source,
                 num_replicas=self.world_size,
                 rank=self.rank,
                 shuffle=False,
             )
         else:
-            sampler = torch.utils.data.SequentialSampler(dataset)
+            sampler = torch.utils.data.SequentialSampler(data_source)
 
         return torch.utils.data.DataLoader(
-            dataset,
+            data_source,
             sampler=sampler,
             batch_size=self._batch_size(),
             num_workers=self.args.num_workers,
@@ -156,7 +163,11 @@ class BaseInferencePipeline(abc.ABC):
             torch.cuda.empty_cache()
 
     def _run_inference(
-        self, data_loader: torch.utils.data.DataLoader
+        self,
+        data_loader: torch.utils.data.DataLoader,
+        initial_state: dict[str, Any] | None = None,
+        checkpoint_path: str | None = None,
+        checkpoint_every: int = 0,
     ) -> tuple[
         list[dict], list[int], list[float], dict[str, list[float]], float
     ]:
@@ -165,10 +176,14 @@ class BaseInferencePipeline(abc.ABC):
         Returns ``(all_outputs, all_indices, batch_times, extra_timings,
         t_model_load)``.
         """
-        all_outputs: list[dict] = []
-        all_indices: list[int] = []
-        batch_times: list[float] = []
-        extra_timings: dict[str, list[float]] = {}
+        initial_state = initial_state or {}
+        all_outputs = list(initial_state.get("all_outputs", []))
+        all_indices = list(initial_state.get("all_indices", []))
+        batch_times = list(initial_state.get("batch_times", []))
+        extra_timings = {
+            key: list(values)
+            for key, values in initial_state.get("extra_timings", {}).items()
+        }
 
         t0_load = time.perf_counter()
         models = self._load_models()
@@ -198,6 +213,18 @@ class BaseInferencePipeline(abc.ABC):
                 all_indices.extend(
                     batch[self._index_key].cpu().numpy().tolist()
                 )
+                if (
+                    checkpoint_path is not None
+                    and checkpoint_every > 0
+                    and len(all_outputs) % checkpoint_every == 0
+                ):
+                    self._save_partial_checkpoint(
+                        checkpoint_path,
+                        all_outputs,
+                        all_indices,
+                        batch_times,
+                        extra_timings,
+                    )
 
         return (
             all_outputs,
@@ -206,6 +233,28 @@ class BaseInferencePipeline(abc.ABC):
             extra_timings,
             t_model_load,
         )
+
+    @staticmethod
+    def _save_partial_checkpoint(
+        checkpoint_path: str,
+        all_outputs: list[dict],
+        all_indices: list[int],
+        batch_times: list[float],
+        extra_timings: dict[str, list[float]],
+    ) -> None:
+        """Atomically persist resumable, rank-local inference outputs."""
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        temporary_path = checkpoint_path + ".tmp"
+        torch.save(
+            {
+                "all_outputs": all_outputs,
+                "all_indices": all_indices,
+                "batch_times": batch_times,
+                "extra_timings": extra_timings,
+            },
+            temporary_path,
+        )
+        os.replace(temporary_path, checkpoint_path)
 
     def _gather_outputs(
         self,
@@ -240,6 +289,7 @@ class BaseInferencePipeline(abc.ABC):
         """Run inference end-to-end and return ``(global_outputs, timing)``."""
         args = self.args
         cache_path = os.path.join(args.curr_path, self.file_name)
+        partial_path = cache_path + ".partial"
 
         rerun = getattr(args, "rerun_from", None)
         trig = self._rerun_from_triggers
@@ -250,20 +300,51 @@ class BaseInferencePipeline(abc.ABC):
         ):
             os.remove(cache_path)
             logger.info(f"[rerun_from={rerun}] Deleted {cache_path}")
+        if rerun is not None and os.path.exists(partial_path):
+            os.remove(partial_path)
+            logger.info(f"[rerun_from={rerun}] Deleted {partial_path}")
 
         batch_times: list[float] = []
         extra_timings: dict[str, list[float]] = {}
         t_model_load = 0.0
 
         if not (args.force_load and os.path.exists(cache_path)):
-            data_loader = self._make_dataloader(dataset)
+            initial_state = None
+            remaining_indices = list(range(len(dataset)))
+            resume_partial = getattr(args, "resume_partial", False)
+            if resume_partial and os.path.exists(partial_path):
+                if args.distributed:
+                    raise ValueError(
+                        "Partial inference resume is supported only for "
+                        "single-process runs"
+                    )
+                initial_state = torch.load(partial_path, weights_only=False)
+                completed = set(initial_state.get("all_indices", []))
+                remaining_indices = [
+                    index
+                    for index in remaining_indices
+                    if index not in completed
+                ]
+                logger.info(
+                    "Resuming %s from %d completed batches; %d remain",
+                    self._profiling_label,
+                    len(completed),
+                    len(remaining_indices),
+                )
+
+            data_loader = self._make_dataloader(dataset, remaining_indices)
             (
                 all_outputs,
                 all_indices,
                 batch_times,
                 extra_timings,
                 t_model_load,
-            ) = self._run_inference(data_loader)
+            ) = self._run_inference(
+                data_loader,
+                initial_state=initial_state,
+                checkpoint_path=partial_path if resume_partial else None,
+                checkpoint_every=getattr(args, "checkpoint_every", 0),
+            )
 
             global_outputs = self._gather_outputs(
                 all_outputs, all_indices, dataset
@@ -272,6 +353,8 @@ class BaseInferencePipeline(abc.ABC):
             if self.rank == 0:
                 os.makedirs(args.curr_path, exist_ok=True)
                 torch.save(global_outputs, cache_path)
+                if os.path.exists(partial_path):
+                    os.remove(partial_path)
         else:
             logger.info("Loading existing results...")
             global_outputs = torch.load(cache_path, weights_only=False)
