@@ -121,3 +121,21 @@ def test_frame_world_points_uses_opencv_pose(tmp_path: Path):
     # The depth image is one metre. OpenCV +Y and +Z are flipped relative to
     # the identity ARKit camera, while the camera center remains unchanged.
     np.testing.assert_allclose(points[:, 2], 2.0)
+
+
+def test_frame_world_points_stride_preserves_original_pixel_coordinates(
+    tmp_path: Path,
+):
+    _write_frame(tmp_path, 100, (1.0, 2.0, 3.0))
+    manifest, _ = build_polycam_manifest(tmp_path)
+    frame = manifest["frames"][0]
+    dense_points, _ = frame_world_points(
+        frame, tmp_path, pixel_step=1, min_confidence=255
+    )
+    strided_points, _ = frame_world_points(
+        frame, tmp_path, pixel_step=2, min_confidence=255
+    )
+    # A 3x4 depth map sampled at y={0,2}, x={0,2} selects these flattened
+    # full-resolution pixels. Back-projection must not renumber them to a 2x2
+    # image coordinate system.
+    np.testing.assert_allclose(strided_points, dense_points[[0, 2, 8, 10]])

@@ -474,10 +474,17 @@ def frame_world_points(
         return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
 
     intrinsics = np.asarray(frame["intrinsics_depth"], dtype=np.float64)
-    sampled_depth = np.zeros_like(z, dtype=np.float64)
-    sampled_depth[valid] = z[valid]
-    point_map = backproject_z_depth(sampled_depth, intrinsics)
-    points_camera = point_map[valid]
+    sampled_x = x[valid].astype(np.float64)
+    sampled_y = y[valid].astype(np.float64)
+    sampled_z = z[valid].astype(np.float64)
+    points_camera = np.stack(
+        [
+            (sampled_x - intrinsics[0, 2]) * sampled_z / intrinsics[0, 0],
+            (sampled_y - intrinsics[1, 2]) * sampled_z / intrinsics[1, 1],
+            sampled_z,
+        ],
+        axis=1,
+    )
     c2w = np.asarray(frame["raw_c2w_opencv"], dtype=np.float64)
     points_world = (points_camera @ c2w[:3, :3].T + c2w[:3, 3]).astype(
         np.float32
