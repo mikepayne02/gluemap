@@ -371,7 +371,9 @@ def build_polycam_manifest(
             "max": np.max(intrinsics_array, axis=0).tolist(),
         },
         "camera_center_span_xyz_m": np.ptp(centers_array, axis=0).tolist(),
-        "camera_step_m": _percentiles(step_distances),
+        "camera_step_m": _percentiles(step_distances)
+        if len(step_distances)
+        else None,
         "reset_jump_threshold_m": reset_jump_threshold_m,
         "reset_after_sequence_indices": reset_after,
         "reset_steps_m": [
@@ -421,3 +423,78 @@ def write_polycam_audit(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
     return manifest_path, report_path
+
+
+def load_polycam_manifest(path: str | Path) -> dict[str, Any]:
+    """Load and minimally validate a manifest produced by this module."""
+    path = Path(path).expanduser().resolve()
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1:
+        raise PolycamDatasetError("Unsupported Polycam manifest schema")
+    frames = manifest.get("frames")
+    if not isinstance(frames, list) or len(frames) != manifest.get(
+        "frame_count"
+    ):
+        raise PolycamDatasetError("Manifest frame count is inconsistent")
+    return manifest
+
+
+def frame_world_points(
+    frame: dict[str, Any],
+    source_root: str | Path,
+    *,
+    pixel_step: int = 1,
+    min_confidence: int = 255,
+    min_depth_m: float = 0.08,
+    max_depth_m: float = 6.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project one manifest frame's measured depth and RGB into world space."""
+    if pixel_step <= 0:
+        raise ValueError("pixel_step must be positive")
+    source_root = Path(source_root)
+    paths = frame["paths"]
+    with Image.open(source_root / paths["depth"]) as image:
+        depth = np.asarray(image, dtype=np.float32) * 0.001
+    with Image.open(source_root / paths["confidence"]) as image:
+        confidence = np.asarray(image, dtype=np.uint8)
+    with Image.open(source_root / paths["rgb"]) as image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+
+    y, x = np.mgrid[
+        0 : depth.shape[0] : pixel_step, 0 : depth.shape[1] : pixel_step
+    ]
+    z = depth[y, x]
+    valid = (
+        np.isfinite(z)
+        & (z >= min_depth_m)
+        & (z <= max_depth_m)
+        & (confidence[y, x] >= min_confidence)
+    )
+    if not np.any(valid):
+        return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
+
+    intrinsics = np.asarray(frame["intrinsics_depth"], dtype=np.float64)
+    sampled_depth = np.zeros_like(z, dtype=np.float64)
+    sampled_depth[valid] = z[valid]
+    point_map = backproject_z_depth(sampled_depth, intrinsics)
+    points_camera = point_map[valid]
+    c2w = np.asarray(frame["raw_c2w_opencv"], dtype=np.float64)
+    points_world = (points_camera @ c2w[:3, :3].T + c2w[:3, 3]).astype(
+        np.float32
+    )
+
+    rgb_height, rgb_width = rgb.shape[:2]
+    depth_height, depth_width = depth.shape
+    rgb_x = np.clip(
+        np.round((x[valid] + 0.5) * rgb_width / depth_width - 0.5).astype(int),
+        0,
+        rgb_width - 1,
+    )
+    rgb_y = np.clip(
+        np.round((y[valid] + 0.5) * rgb_height / depth_height - 0.5).astype(
+            int
+        ),
+        0,
+        rgb_height - 1,
+    )
+    return points_world, rgb[rgb_y, rgb_x]

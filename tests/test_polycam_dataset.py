@@ -11,6 +11,7 @@ from gluemap.datasets.polycam import (
     backproject_z_depth,
     build_polycam_manifest,
     discover_polycam_frames,
+    frame_world_points,
     project_camera_points,
     scale_intrinsics,
 )
@@ -107,3 +108,16 @@ def test_discovery_rejects_missing_modality(tmp_path: Path):
     (tmp_path / "keyframes" / "confidence" / "100.png").unlink()
     with pytest.raises(PolycamDatasetError, match="association failed"):
         discover_polycam_frames(tmp_path)
+
+
+def test_frame_world_points_uses_opencv_pose(tmp_path: Path):
+    _write_frame(tmp_path, 100, (1.0, 2.0, 3.0))
+    manifest, _ = build_polycam_manifest(tmp_path)
+    points, colors = frame_world_points(
+        manifest["frames"][0], tmp_path, pixel_step=1, min_confidence=255
+    )
+    assert points.shape == (12, 3)
+    assert colors.shape == (12, 3)
+    # The depth image is one metre. OpenCV +Y and +Z are flipped relative to
+    # the identity ARKit camera, while the camera center remains unchanged.
+    np.testing.assert_allclose(points[:, 2], 2.0)

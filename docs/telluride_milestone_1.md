@@ -68,3 +68,23 @@ The audit deliberately does not claim that these unresolved items are correct:
 
 The adjacent-frame reset correction in the archived experiments is only an
 initialization. It is not an accepted reset transform.
+
+## CPU reset diagnostics
+
+Generate manageable raw segment clouds, the complete camera path, and RGB/depth
+overlays locally with:
+
+```bash
+PYTHONPATH=. python scripts/project_polycam_diagnostics.py \
+  /path/to/dataset_audit/manifest.json \
+  /path/to/reset_diagnostics/raw_preview \
+  --pixel-step 8 \
+  --min-confidence 255 \
+  --max-depth-m 6
+```
+
+The two `raw_segment_*.ply` files retain RGB colors. The camera-center PLY uses
+cyan for segment 0 and magenta for segment 1. Every input frame is processed;
+`summary.json` reports how many contributed depth points. Set `--pixel-step 1`
+for full-resolution diagnostic clouds after the preview conventions are
+accepted.
