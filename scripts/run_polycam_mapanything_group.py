@@ -25,11 +25,14 @@ def _group_indices(config: dict, name: str) -> tuple[dict, list[int]]:
     if len(matches) != 1:
         raise ValueError(f"Expected exactly one group named {name!r}")
     group = matches[0]
-    indices = []
-    for start, end in group["frame_ranges_inclusive"]:
-        if end < start:
-            raise ValueError(f"Invalid frame range [{start}, {end}]")
-        indices.extend(range(start, end + 1))
+    if "frame_indices" in group:
+        indices = [int(index) for index in group["frame_indices"]]
+    else:
+        indices = []
+        for start, end in group["frame_ranges_inclusive"]:
+            if end < start:
+                raise ValueError(f"Invalid frame range [{start}, {end}]")
+            indices.extend(range(start, end + 1))
     if len(indices) != len(set(indices)):
         raise ValueError("Group frame ranges overlap")
     expected = group.get("expected_view_count")

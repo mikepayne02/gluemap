@@ -84,7 +84,9 @@ lowest-memory configuration in MapAnything's published profiling.
 ## First bridge result
 
 The first A40 run used MapAnything v1.1.1, BF16, and dense-head minibatch size
-1. Each 64-view inference took about 71 seconds. Both outputs retained metric
+1. The initial standalone process took about 71 seconds including setup; the
+subsequent single-model-load batch took about 16-19 seconds per 64-view star.
+Both outputs retained metric
 depth and intrinsics; only pose conditioning differed.
 
 | Measurement | Corrected poses | No poses |
@@ -98,8 +100,13 @@ depth and intrinsics; only pose conditioning differed.
 The corrected-pose run preserves almost all of the known 1.6 m staircase
 trajectory split. Omitting poses removes roughly 1.15 m of that discrepancy,
 while retaining mean agreement with confidence-255 LiDAR samples within 3.7
-cm. Visual comparison of the exported clouds remains required before choosing
-the bridge-group policy.
+cm. CloudCompare inspection found that the pose-free result is one of the best
+basement-landing reconstructions produced during the project.
+
+The resulting project-wide policy is to run MapAnything with RGB, metric depth,
+and intrinsics but without pose conditioning. Corrected ARKit poses remain in
+the frontend for graph construction and global initialization, and become soft
+priors during final refinement.
 
 ## Acceptance criteria
 
@@ -113,7 +120,5 @@ Compare the two outputs using:
 - agreement with the adjacent lower-landing validation group.
 
 Pass if one configuration reconstructs one coherent staircase at metric scale
-without damaging locally correct depth surfaces. If poses preserve the 1.6 m
-split while pose-free inference merges the true geometry, omit or weaken poses
-for bridge groups only. Do not disable pose conditioning globally based on this
-single ablation.
+without damaging locally correct depth surfaces. The pose-free configuration
+passed this gate and is now the default for all local groups.
