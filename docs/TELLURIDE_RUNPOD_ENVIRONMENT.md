@@ -161,12 +161,11 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   ablation from the original handoff. In that mode GLUEMAP skips both SIFT
   database construction and track snapping. Compare it against `SV` from the
   same cached `star_result.pth`; do not rerun MapAnything for this ablation.
-- Optional ARKit pose priors are implemented as robust camera-center and
-  camera-rotation residuals. Before adding them, one Sim3 aligns the corrected
-  metric ARKit trajectory into GLUEMAP's current gauge. Position sigma is
-  specified in metres and converted by that Sim3 scale; rotation sigma is in
-  degrees. The first queued control uses `SV`, 0.30 m, and 3 degrees. Pose
-  priors are disabled unless `--pose-prior-position-sigma-m` is supplied.
+- Corrected ARKit poses are a frontend vicinity/reset signal and a diagnostic,
+  not ground truth. The normal `SV` and `V` optimization paths do not add an
+  ARKit residual. Do not pass `--pose-prior-position-sigma-m` in Telluride
+  production runs; differences after diagnostic Sim3 alignment must be called
+  ARKit disagreement, not camera error.
 - A validated 48-frame native run is preserved at
   `/workspace/telluride/results/native_integration_1700_1747`. After one
   diagnostic Sim3 to ARKit its camera-center errors were 2.08 cm median,

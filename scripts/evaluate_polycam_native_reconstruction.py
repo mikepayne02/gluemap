@@ -104,7 +104,7 @@ def main() -> None:
     (args.output_directory / "aligned_cameras.json").write_text(
         json.dumps(aligned_poses, indent=2) + "\n", encoding="utf-8"
     )
-    with (args.output_directory / "camera_errors.csv").open(
+    with (args.output_directory / "arkit_disagreement.csv").open(
         "w", newline="", encoding="utf-8"
     ) as stream:
         writer = csv.writer(stream)
@@ -112,11 +112,11 @@ def main() -> None:
             [
                 "manifest_index",
                 "image_name",
-                "position_error_m",
-                "rotation_error_deg",
-                "residual_x_m",
-                "residual_y_m",
-                "residual_z_m",
+                "arkit_position_disagreement_m",
+                "arkit_rotation_disagreement_deg",
+                "disagreement_x_m",
+                "disagreement_y_m",
+                "disagreement_z_m",
                 "arkit_x_m",
                 "arkit_y_m",
                 "arkit_z_m",
@@ -179,16 +179,18 @@ def main() -> None:
         linewidth=0.8,
         alpha=0.8,
     )
-    axes[0].set_ylabel("Position residual (m)")
+    axes[0].set_ylabel("Position disagreement (m)")
     axes[0].grid(alpha=0.2)
     axes[0].legend(ncol=4)
     axes[1].plot(manifest_indices, rotation_errors, color="tab:orange")
-    axes[1].set_ylabel("Rotation residual (deg)")
+    axes[1].set_ylabel("Rotation disagreement (deg)")
     axes[1].set_xlabel("Manifest frame index")
     axes[1].grid(alpha=0.2)
-    figure.suptitle("Native GLUEMAP residuals after one global Sim3 to ARKit")
+    figure.suptitle(
+        "Native GLUEMAP disagreement with ARKit after one diagnostic Sim3"
+    )
     figure.tight_layout()
-    figure.savefig(args.output_directory / "camera_errors.png", dpi=180)
+    figure.savefig(args.output_directory / "arkit_disagreement.png", dpi=180)
     plt.close(figure)
     points_output = None
     if reconstruction.num_points3D() > 0:
@@ -208,12 +210,12 @@ def main() -> None:
         "image_count": len(images),
         "point_count": reconstruction.num_points3D(),
         "similarity_scale": scale,
-        "position_error_m": {
+        "arkit_position_disagreement_m": {
             "median": float(np.median(position_errors)),
             "p95": float(np.percentile(position_errors, 95)),
             "maximum": float(np.max(position_errors)),
         },
-        "rotation_error_deg": {
+        "arkit_rotation_disagreement_deg": {
             "median": float(np.median(rotation_errors)),
             "p95": float(np.percentile(rotation_errors, 95)),
             "maximum": float(np.max(rotation_errors)),
