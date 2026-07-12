@@ -203,6 +203,41 @@ def _add_virtual_track_residuals(
     )
 
 
+def _add_camera_pose_prior_residuals(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    pose_priors: dict[str, dict[str, np.ndarray]] | None,
+) -> None:
+    """Add robust camera-center and rotation priors keyed by image name."""
+    if not pose_priors:
+        return
+
+    loss_function = _pyceres_loss_function("huber")
+    num_constraints = 0
+    for image_id, image in reconstruction.images.items():
+        prior = pose_priors.get(image.name)
+        if prior is None:
+            continue
+        cost = pygluemap.CameraPosePriorError(
+            np.asarray(prior["center"], dtype=np.float64),
+            np.asarray(prior["cam_from_world_rotation"], dtype=np.float64),
+            float(prior["center_sigma"]),
+            float(prior["rotation_sigma"]),
+        )
+        problem.add_residual_block(
+            cost,
+            loss_function,
+            [reconstruction.frames[image_id].rig_from_world.params],
+        )
+        num_constraints += 1
+
+    logger.info(
+        "Added %d camera pose-prior constraints for %d images",
+        num_constraints,
+        len(reconstruction.images),
+    )
+
+
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -210,6 +245,8 @@ def bundle_adjustment(
     max_num_iterations: int = 200,
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
+    fix_intrinsics: bool = False,
+    pose_priors: dict[str, dict[str, np.ndarray]] | None = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -238,6 +275,8 @@ def bundle_adjustment(
             ``"trivial"``, ``"huber"``, ``"cauchy"``.
         loss_type_virtual: Loss function for virtual tracks. One of
             ``"trivial"``, ``"huber"``, ``"arctan"``, ``"cauchy"``.
+        fix_intrinsics: Keep every camera calibration parameter block constant.
+        pose_priors: Optional robust absolute pose priors keyed by image name.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -266,6 +305,9 @@ def bundle_adjustment(
         ba_config.add_image(image_id)
     for point3D_id in reconstruction.points3D:
         ba_config.add_variable_point(point3D_id)
+    if fix_intrinsics:
+        for camera_id in reconstruction.cameras:
+            ba_config.set_constant_cam_intrinsics(camera_id)
     ba_config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
 
     bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
@@ -288,6 +330,7 @@ def bundle_adjustment(
         negative_depth_observations=negative_depth_observations,
         loss_function=_pyceres_loss_function(loss_type_virtual),
     )
+    _add_camera_pose_prior_residuals(problem, reconstruction, pose_priors)
 
     logger.info(
         f"After virtual residual add: "

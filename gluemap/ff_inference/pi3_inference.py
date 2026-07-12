@@ -26,9 +26,19 @@ class Pi3LocalInference(LocalInference):
             ``local_points``, ``camera_poses`` and recovered ``shift``.
         """
         images = batch["images"].to(self.device).contiguous()
+        metric_depths = batch.get("metric_depths")
+        metric_intrinsics = batch.get("metric_intrinsics")
+        if metric_depths is not None:
+            metric_depths = metric_depths.to(self.device).contiguous()
+        if metric_intrinsics is not None:
+            metric_intrinsics = metric_intrinsics.to(self.device).contiguous()
 
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            predictions = self.model(images)
+            predictions = self.model(
+                images,
+                depths=metric_depths,
+                intrinsics=metric_intrinsics,
+            )
 
         # Rename depth confidence to avoid collision with tracker confidence
         if "conf" in predictions and "depth_conf" not in predictions:
@@ -36,14 +46,19 @@ class Pi3LocalInference(LocalInference):
 
         # Calibrate: sets depth, shift, depth_conf in predictions and
         # returns extrinsics/intrinsics
-        extrinsics, intrinsics = self._calibrate(predictions)
+        extrinsics, intrinsics = self._calibrate(
+            predictions, known_intrinsics=metric_intrinsics
+        )
         predictions["extrinsics"] = extrinsics
         predictions["intrinsics"] = intrinsics
 
         return predictions
 
     @staticmethod
-    def _calibrate(result: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    def _calibrate(
+        result: dict,
+        known_intrinsics: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Recover camera calibration from Pi3's local point map.
 
         Consumes ``local_points`` and ``camera_poses`` from ``result``, recovers
@@ -66,6 +81,18 @@ class Pi3LocalInference(LocalInference):
         points = result["local_points"]  # Shape: (B, N, H, W, 3)
         result["depth_conf"] = result["depth_conf"][..., 0]
         masks = torch.sigmoid(result["depth_conf"]) > 0.1  # Shape: (B, N, H, W)
+
+        if known_intrinsics is not None:
+            result["shift"] = torch.zeros(
+                points.shape[:2], device=points.device, dtype=points.dtype
+            )
+            result["depth"] = points[..., 2].unsqueeze(-1)
+            intrinsics = known_intrinsics.to(points)
+            extrinsics = (
+                torch.linalg.inv(result["camera_poses"])
+                @ result["camera_poses"][:, :1]
+            )
+            return extrinsics, intrinsics
 
         focal, shift = Pi3LocalInference._recover_focal_shift(
             points, masks, downsample_size=(64, 64)

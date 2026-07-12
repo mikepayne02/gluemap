@@ -63,6 +63,51 @@ private:
 };
 
 // ----------------------------------------
+// CameraPosePriorError
+// ----------------------------------------
+// Soft absolute prior on a COLMAP cam_from_world pose. Translation is
+// expressed as camera-center error so rotation and translation parameters do
+// not create a misleading coupled prior.
+struct CameraPosePriorError
+    : public colmap::AutoDiffCostFunctor<CameraPosePriorError, 6, 7> {
+  CameraPosePriorError(const Eigen::Vector3d &target_center,
+                       const Eigen::Matrix3d &target_cam_from_world_rotation,
+                       const double center_sigma,
+                       const double rotation_sigma)
+      : target_center_(target_center),
+        target_rotation_(target_cam_from_world_rotation),
+        inverse_center_sigma_(1.0 / center_sigma),
+        inverse_rotation_sigma_(1.0 / rotation_sigma) {}
+
+  template <typename T>
+  bool operator()(const T *const cam_from_world, T *residuals) const {
+    const Eigen::Map<const Eigen::Quaternion<T>> rotation(cam_from_world);
+    const Eigen::Map<const Eigen::Matrix<T, 3, 1>> translation(
+        cam_from_world + 4);
+    const Eigen::Matrix<T, 3, 1> center = rotation.conjugate() * -translation;
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> center_residuals(residuals);
+    center_residuals =
+        (center - target_center_.cast<T>()) * T(inverse_center_sigma_);
+
+    Eigen::Quaternion<T> target_rotation(target_rotation_.cast<T>());
+    Eigen::Quaternion<T> delta = target_rotation.conjugate() * rotation;
+    if (delta.w() < T(0.0)) {
+      delta.coeffs() *= T(-1.0);
+    }
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> rotation_residuals(residuals + 3);
+    rotation_residuals =
+        T(2.0 * inverse_rotation_sigma_) * delta.vec();
+    return true;
+  }
+
+private:
+  const Eigen::Vector3d target_center_;
+  const Eigen::Matrix3d target_rotation_;
+  const double inverse_center_sigma_;
+  const double inverse_rotation_sigma_;
+};
+
+// ----------------------------------------
 // ReprojErrorCostWithNegativeDepthFunctor
 // ----------------------------------------
 // Standard bundle adjustment cost function for variable

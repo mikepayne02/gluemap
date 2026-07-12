@@ -21,11 +21,22 @@ class MapAnythingLocalInference(LocalInference):
             and ``intrinsics`` of shape ``(1, N, 3, 3)``.
         """
         images = batch["images"].to(self.device).contiguous()
-        processed_views = self._compose_input_views(images)
+        metric_depths = batch.get("metric_depths")
+        metric_intrinsics = batch.get("metric_intrinsics")
+        if metric_depths is not None:
+            metric_depths = metric_depths.to(self.device).contiguous()
+        if metric_intrinsics is not None:
+            metric_intrinsics = metric_intrinsics.to(self.device).contiguous()
+        processed_views = self._compose_input_views(
+            images,
+            metric_depths=metric_depths,
+            global_intrinsics=metric_intrinsics,
+        )
 
         predictions = self.model.infer(
             processed_views,
-            memory_efficient_inference=False,
+            memory_efficient_inference=True,
+            minibatch_size=1,
             use_amp=True,
             amp_dtype="bf16",
             apply_mask=True,
@@ -34,9 +45,9 @@ class MapAnythingLocalInference(LocalInference):
             confidence_percentile=10,
             ignore_calibration_inputs=False,
             ignore_depth_inputs=False,
-            ignore_pose_inputs=False,
+            ignore_pose_inputs=True,
             ignore_depth_scale_inputs=False,
-            ignore_pose_scale_inputs=False,
+            ignore_pose_scale_inputs=True,
         )
 
         return self._retrieve_result(predictions)
@@ -44,6 +55,7 @@ class MapAnythingLocalInference(LocalInference):
     @staticmethod
     def _compose_input_views(
         images: torch.Tensor,
+        metric_depths: torch.Tensor | None = None,
         global_rotations: torch.Tensor | None = None,
         global_centers: torch.Tensor | None = None,
         global_intrinsics: torch.Tensor | None = None,
@@ -83,6 +95,11 @@ class MapAnythingLocalInference(LocalInference):
 
             if global_intrinsics is not None:
                 view["intrinsics"] = global_intrinsics[0, i]
+            if metric_depths is not None:
+                view["depth_z"] = metric_depths[0, i]
+                view["is_metric_scale"] = torch.ones(
+                    1, device=metric_depths.device, dtype=torch.bool
+                )
 
             input_views.append(view)
 

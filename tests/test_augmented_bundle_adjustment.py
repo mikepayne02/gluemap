@@ -9,12 +9,62 @@ import copy
 import logging
 
 import numpy as np
+import pyceres
 import pycolmap
+import pygluemap
 
 from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
+
+
+def test_camera_pose_prior_cost_is_zero_at_target():
+    center = np.array([1.0, -2.0, 3.0])
+    rotation = np.eye(3)
+    # COLMAP pose parameters are [qx, qy, qz, qw, tx, ty, tz].
+    cam_from_world = np.concatenate(([0.0, 0.0, 0.0, 1.0], -center))
+    problem = pyceres.Problem()
+    problem.add_residual_block(
+        pygluemap.CameraPosePriorError(center, rotation, 0.2, 0.05),
+        None,
+        [cam_from_world],
+    )
+
+    residuals = problem.evaluate_residuals()
+    np.testing.assert_allclose(residuals, np.zeros(6), atol=1e-12)
+
+
+def test_camera_pose_prior_cost_uses_center_and_rotation_sigmas():
+    target_center = np.array([1.0, -2.0, 3.0])
+    current_center = target_center + np.array([0.1, 0.0, 0.0])
+    angle = 0.1
+    quaternion_xyzw = np.array(
+        [0.0, 0.0, np.sin(angle / 2.0), np.cos(angle / 2.0)]
+    )
+    rotation = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    translation = -(rotation @ current_center)
+    cam_from_world = np.concatenate((quaternion_xyzw, translation))
+    problem = pyceres.Problem()
+    problem.add_residual_block(
+        pygluemap.CameraPosePriorError(target_center, np.eye(3), 0.2, 0.05),
+        None,
+        [cam_from_world],
+    )
+
+    residuals = problem.evaluate_residuals()
+    np.testing.assert_allclose(residuals[:3], [0.5, 0.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(
+        residuals[3:],
+        [0.0, 0.0, 2.0 * np.sin(angle / 2.0) / 0.05],
+        atol=1e-12,
+    )
 
 
 def split_reconstruction(source, point_ids_to_keep):
@@ -266,6 +316,36 @@ class TestBundleAdjustmentEndToEnd:
 
         # After BA, virtual must have the same cameras and poses as normal.
         self._assert_same_cameras_and_poses(rec_virtual, rec_normal)
+
+    def test_fix_intrinsics_keeps_calibration_constant(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=6, num_points3D=80, seed=17
+        )
+        rng = np.random.default_rng(17)
+        perturb_points3D(reconstruction, fraction=1.0, noise_std=0.02, rng=rng)
+        self._perturb_poses(
+            reconstruction,
+            translation_std=0.01,
+            rotation_std_deg=0.5,
+            rng=rng,
+        )
+        expected = {
+            camera_id: camera.params.copy()
+            for camera_id, camera in reconstruction.cameras.items()
+        }
+
+        reconstruction, _, _ = bundle_adjustment(
+            reconstruction,
+            virtual_reconstruction=None,
+            negative_depth_observations={},
+            max_num_iterations=50,
+            fix_intrinsics=True,
+        )
+
+        for camera_id, parameters in expected.items():
+            np.testing.assert_array_equal(
+                reconstruction.cameras[camera_id].params, parameters
+            )
 
     def test_ba_recovers_from_noise(self):
         """After adding small noise to 3D points and poses, BA should

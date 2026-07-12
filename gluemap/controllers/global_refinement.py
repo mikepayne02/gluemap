@@ -190,6 +190,7 @@ def run_refinement_pipeline(
     angular_error_threshold_deg: float = 0.5,
     num_refinement_iterations: int = 2,
     track_mode: str = "SPV",
+    pose_priors: dict | None = None,
 ) -> pycolmap.Reconstruction:
     """
     Run the refinement pipeline.
@@ -211,6 +212,7 @@ def run_refinement_pipeline(
             points.
         track_mode: Combination of S(IFT), P(rior), V(irtual) tracks to use.
             Valid modes: "SPV", "SP", "SV", "PV", "S", "P".
+        pose_priors: Optional robust absolute camera priors keyed by image name.
 
     Returns:
         pycolmap.Reconstruction: The bundle-adjusted reconstruction
@@ -371,6 +373,8 @@ def run_refinement_pipeline(
         normalized_reproj_threshold=1e-2,
         min_track_length=2,
         fix_rotations_first_pass=False,
+        fix_intrinsics=getattr(args, "fix_intrinsics", False),
+        pose_priors=pose_priors,
     )
 
     # Step 5: Build reconstruction from current data
@@ -529,7 +533,26 @@ def run_refinement_pipeline(
         args.curr_path + "/" + file_dir,
     )
     os.makedirs(args.curr_path + "/" + file_dir, exist_ok=True)
-    reconstruction.write(args.curr_path + "/" + file_dir)
+    output_reconstruction = reconstruction
+    if track_mode == "V" and virtual_reconstruction is not None:
+        output_reconstruction = virtual_reconstruction
+        logger.info(
+            "Virtual-only mode: writing the neural/virtual reconstruction "
+            "as the primary COLMAP output."
+        )
+    output_reconstruction.write(args.curr_path + "/" + file_dir)
+
+    if (
+        virtual_reconstruction is not None
+        and output_reconstruction is not virtual_reconstruction
+    ):
+        virtual_file_dir = f"gluemap_aba_virtual{suffix}"
+        os.makedirs(args.curr_path + "/" + virtual_file_dir, exist_ok=True)
+        virtual_reconstruction.write(args.curr_path + "/" + virtual_file_dir)
+        logger.info(
+            "Wrote neural/virtual COLMAP reconstruction: %s",
+            args.curr_path + "/" + virtual_file_dir,
+        )
     refinement_timing["write_output"] = time.perf_counter() - t0
 
     refinement_timing["iterations"] = iteration_timings

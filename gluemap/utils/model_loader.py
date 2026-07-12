@@ -97,7 +97,7 @@ def load_models(
     elif chosen_model == "pi3x" and chosen_model in keys:
         from pi3.models.pi3x import Pi3X
 
-        models["pi3x"] = Pi3X(use_multimodal=False)
+        models["pi3x"] = Pi3X(use_multimodal=True)
         models["pi3x"].load_state_dict(
             load_file(args.path_feedforward), strict=False
         )

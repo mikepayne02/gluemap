@@ -101,6 +101,13 @@ PYBIND11_MODULE(pygluemap, m) {
         &PairwiseDirectionError::Create<const Eigen::Vector3d &>,
         py::arg("translation_obs"));
 
+  m.def("CameraPosePriorError",
+        &CameraPosePriorError::Create<const Eigen::Vector3d &,
+                                      const Eigen::Matrix3d &, const double,
+                                      const double>,
+        py::arg("target_center"), py::arg("target_cam_from_world_rotation"),
+        py::arg("center_sigma"), py::arg("rotation_sigma"));
+
   m.def("ReprojErrorCost",
         &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor,
                                           const Eigen::Vector2d &>,

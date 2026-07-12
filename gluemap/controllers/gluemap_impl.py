@@ -3,6 +3,7 @@ import logging
 import os
 import time
 
+import numpy as np
 import torch
 
 from gluemap.controllers.global_merger import GlobalGluer
@@ -30,6 +31,68 @@ from gluemap.utils.colmap import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_aligned_pose_priors(
+    arkit_c2w_poses: list[np.ndarray],
+    global_centers: dict[int, np.ndarray],
+    image_names: list[str],
+    position_sigma_m: float,
+    rotation_sigma_deg: float,
+) -> dict[str, dict[str, np.ndarray | float]]:
+    """Align metric ARKit poses to GLUEMAP's gauge and build soft priors."""
+    source_centers = np.stack([pose[:3, 3] for pose in arkit_c2w_poses])
+    target_centers = np.stack(
+        [np.asarray(global_centers[index]) for index in range(len(image_names))]
+    )
+    source_mean = source_centers.mean(axis=0)
+    target_mean = target_centers.mean(axis=0)
+    source_centered = source_centers - source_mean
+    target_centered = target_centers - target_mean
+    left, singular_values, right_t = np.linalg.svd(
+        source_centered.T @ target_centered / len(source_centers)
+    )
+    alignment_rotation = right_t.T @ left.T
+    if np.linalg.det(alignment_rotation) < 0:
+        right_t[-1] *= -1
+        alignment_rotation = right_t.T @ left.T
+    alignment_scale = float(
+        singular_values.sum()
+        / np.mean(np.sum(source_centered * source_centered, axis=1))
+    )
+    alignment_translation = target_mean - alignment_scale * (
+        alignment_rotation @ source_mean
+    )
+    center_sigma = position_sigma_m * alignment_scale
+    rotation_sigma = np.deg2rad(rotation_sigma_deg)
+    if center_sigma <= 0 or rotation_sigma <= 0:
+        raise ValueError("Pose-prior sigmas must be positive")
+
+    priors = {}
+    for image_name, arkit_pose in zip(
+        image_names, arkit_c2w_poses, strict=True
+    ):
+        center = (
+            alignment_scale
+            * (alignment_rotation @ np.asarray(arkit_pose[:3, 3]))
+            + alignment_translation
+        )
+        c2w_rotation = alignment_rotation @ np.asarray(arkit_pose[:3, :3])
+        priors[image_name] = {
+            "center": center,
+            "cam_from_world_rotation": c2w_rotation.T,
+            "center_sigma": center_sigma,
+            "rotation_sigma": rotation_sigma,
+        }
+    logger.info(
+        "Built %d ARKit pose priors after Sim3 gauge alignment "
+        "(scale %.6f, center sigma %.4f native units, rotation sigma %.2f deg)",
+        len(priors),
+        alignment_scale,
+        center_sigma,
+        rotation_sigma_deg,
+    )
+    return priors
 
 
 class GluemapPipeline:
@@ -240,6 +303,30 @@ class GluemapPipeline:
         )
         timing["global_mapping"] = time.perf_counter() - t0
 
+        known_intrinsics = getattr(dataset_pair, "known_intrinsics", None)
+        if known_intrinsics is not None:
+            if len(known_intrinsics) != len(global_intrinsics):
+                raise ValueError(
+                    "Known intrinsics count does not match GLUEMAP camera "
+                    f"buckets: {len(known_intrinsics)} != "
+                    f"{len(global_intrinsics)}"
+                )
+            global_intrinsics = known_intrinsics
+            logger.info(
+                "Replaced model-estimated intrinsics with calibrated dataset "
+                "intrinsics."
+            )
+
+        position_sigma_m = getattr(args, "pose_prior_position_sigma_m", None)
+        if position_sigma_m is not None:
+            dataset_pair.pose_priors = _build_aligned_pose_priors(
+                dataset_pair.pose_priors_c2w,
+                global_centers,
+                dataset_pair.images_list,
+                position_sigma_m,
+                getattr(args, "pose_prior_rotation_sigma_deg", 3.0),
+            )
+
         # Override with GT intrinsics if requested (after global mapping)
         if getattr(args, "gt_intrinsics_path", None):
             from gluemap.utils.colmap import extract_gt_intrinsics
@@ -293,8 +380,11 @@ class GluemapPipeline:
             timing["total"] = time.perf_counter() - t_postproc_start
             return coarse_dir, timing
 
+        track_mode = getattr(args, "track_mode", "SPV")
         t0 = time.perf_counter()
-        if not (
+        if "S" not in track_mode:
+            logger.info(f"Track mode {track_mode}: skipping SIFT database.")
+        elif not (
             hasattr(args, "force_load") and args.force_load
         ) or not os.path.exists(args.curr_path + "/database_sift.db"):
             prepare_sift_database(
@@ -302,7 +392,7 @@ class GluemapPipeline:
                 args.images_path,
                 dataset_pair.images_list,
                 dataset_pair.intrinsics_mapping,
-                matching_pairs,
+                np.asarray(matching_pairs, dtype=np.int64),
                 camera_model=dataset_pair.camera_model,
                 skip_matching=False,
                 remove_existing=True,
@@ -310,13 +400,24 @@ class GluemapPipeline:
         timing["sift_database"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        track_snapping = TrackSnapping(snapping_thres=1.0)
-        track_snapping.main(
-            args.curr_path + "/database_sift.db",
-            predictions_dict,
-            dataset_pair.images_shape_ori,
-            dataset_pair.images_list,
-        )
+        if "P" not in track_mode:
+            logger.info(
+                f"Track mode {track_mode} has no prior tracks: "
+                "skipping track snapping."
+            )
+        elif getattr(args, "use_dummy_tracks", False):
+            # Dummy tracks repeat query-image coordinates in every view. They
+            # exist only because GlobalMerger expects a visibility tensor and
+            # are not valid correspondences to snap or refine against.
+            logger.info("Dummy tracks enabled: skipping track snapping.")
+        else:
+            track_snapping = TrackSnapping(snapping_thres=1.0)
+            track_snapping.main(
+                args.curr_path + "/database_sift.db",
+                predictions_dict,
+                dataset_pair.images_shape_ori,
+                dataset_pair.images_list,
+            )
         timing["track_snapping"] = time.perf_counter() - t0
 
         # Step 5: Refinement
@@ -333,7 +434,8 @@ class GluemapPipeline:
             num_refinement_iterations=getattr(
                 args, "num_refinement_iterations", 2
             ),
-            track_mode=getattr(args, "track_mode", "SPV"),
+            track_mode=track_mode,
+            pose_priors=getattr(dataset_pair, "pose_priors", None),
         )
         timing["refinement"] = time.perf_counter() - t0
         timing["refinement_detail"] = refinement_timing

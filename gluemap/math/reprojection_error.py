@@ -69,7 +69,7 @@ def compute_point_error(
             + (projected[1] - observed[1]) ** 2
         )
         if error_type == ReprojectionErrorType.NORMALIZED:
-            return pixel_error / camera.focal_length
+            return pixel_error / camera.mean_focal_length()
         return pixel_error
 
 
@@ -123,7 +123,7 @@ def _compute_errors_batch(
         projected = camera.img_from_cam(X_proc[valid])  # (M, 2)
         pixel_errors = np.linalg.norm(projected - observed[valid], axis=1)
         if error_type == ReprojectionErrorType.NORMALIZED:
-            pixel_errors = pixel_errors / camera.focal_length
+            pixel_errors = pixel_errors / camera.mean_focal_length()
         errors[valid] = pixel_errors
 
     return errors
