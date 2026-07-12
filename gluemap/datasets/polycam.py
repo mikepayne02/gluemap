@@ -122,6 +122,31 @@ def scale_intrinsics(
     return result
 
 
+def rotate_intrinsics_cw(
+    intrinsics: np.ndarray, source_size_wh: tuple[int, int]
+) -> np.ndarray:
+    """Rotate OpenCV intrinsics for a 90-degree clockwise pixel rotation."""
+    width, height = source_size_wh
+    matrix = np.asarray(intrinsics, dtype=np.float64)
+    return np.array(
+        [
+            [matrix[1, 1], 0.0, (height - 1.0) - matrix[1, 2]],
+            [0.0, matrix[0, 0], matrix[0, 2]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def rotate_c2w_opencv_cw(c2w_opencv: np.ndarray) -> np.ndarray:
+    """Roll an OpenCV camera-to-world pose with a clockwise image rotation."""
+    old_camera_from_new = np.eye(4, dtype=np.float64)
+    old_camera_from_new[:3, :3] = np.array(
+        [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    return np.asarray(c2w_opencv, dtype=np.float64) @ old_camera_from_new
+
+
 def backproject_z_depth(
     depth_z: np.ndarray, intrinsics: np.ndarray
 ) -> np.ndarray:

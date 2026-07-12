@@ -14,6 +14,8 @@ from gluemap.datasets.polycam import (
     discover_polycam_frames,
     frame_world_points,
     project_camera_points,
+    rotate_c2w_opencv_cw,
+    rotate_intrinsics_cw,
     scale_intrinsics,
 )
 
@@ -80,6 +82,35 @@ def test_intrinsics_scaling_and_axis_change():
     )
     converted = arkit_c2w_to_opencv(np.eye(4))
     np.testing.assert_allclose(converted, np.diag([1.0, -1.0, -1.0, 1.0]))
+
+
+def test_clockwise_rotation_preserves_world_ray():
+    intrinsics = np.array([[700.0, 0, 510.0], [0, 710.0, 380.0], [0, 0, 1]])
+    c2w = np.eye(4)
+    old_pixel = np.array([200.0, 100.0])
+    old_ray = np.array(
+        [
+            (old_pixel[0] - intrinsics[0, 2]) / intrinsics[0, 0],
+            (old_pixel[1] - intrinsics[1, 2]) / intrinsics[1, 1],
+            1.0,
+        ]
+    )
+    rotated_intrinsics = rotate_intrinsics_cw(intrinsics, (1024, 768))
+    rotated_pose = rotate_c2w_opencv_cw(c2w)
+    new_pixel = np.array([767.0 - old_pixel[1], old_pixel[0]])
+    new_ray = np.array(
+        [
+            (new_pixel[0] - rotated_intrinsics[0, 2])
+            / rotated_intrinsics[0, 0],
+            (new_pixel[1] - rotated_intrinsics[1, 2])
+            / rotated_intrinsics[1, 1],
+            1.0,
+        ]
+    )
+    np.testing.assert_allclose(
+        rotated_pose[:3, :3] @ new_ray,
+        c2w[:3, :3] @ old_ray,
+    )
 
 
 def test_manifest_orders_frames_and_marks_reset(tmp_path: Path):

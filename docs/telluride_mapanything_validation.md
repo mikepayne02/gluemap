@@ -1,0 +1,97 @@
+# Telluride conditioned MapAnything validation gate
+
+Do not begin a full GLUEMAP reconstruction until this local-group comparison
+passes. The first group contains two visually verified observations of the same
+basement staircase whose corrected ARKit camera centers remain about 1.6 m
+apart.
+
+## Group
+
+`configs/telluride_mapanything_groups.json` defines a 64-view
+`basement_stair_bridge` group:
+
+```text
+frames 2369-2400
+frames 3009-3040
+```
+
+Frames 2379/2380 and 3034 visibly observe the same staircase. This is a real
+loop, not a pose-proximity guess.
+
+All inputs are rotated 90 degrees clockwise to portrait/upright orientation by
+the runner. RGB, depth, confidence, intrinsics, and camera-frame roll are
+transformed together, preserving the same metric world rays.
+
+## GPU-host preparation
+
+Copy these items to the GPU host:
+
+```text
+gluemap/
+dataset_audit/manifest_corrected.json
+polycam_raw/keyframes/{images,depth,confidence}/
+```
+
+Initialize the pinned MapAnything submodule and install GLUEMAP according to
+`INSTALL.md`:
+
+```bash
+cd /workspace/telluride/gluemap
+git submodule update --init thirdparty/mapanything
+```
+
+The runner deliberately uses MapAnything directly for this gate. It does not
+run SALAD, Doppelgangers++, SIFT, tracking, or global mapping.
+
+## Runs
+
+Pose-conditioned:
+
+```bash
+python scripts/run_polycam_mapanything_group.py \
+  /workspace/telluride/dataset_audit/manifest_corrected.json \
+  configs/telluride_mapanything_groups.json \
+  basement_stair_bridge \
+  /workspace/telluride/results/basement_stair_bridge/with_pose \
+  --source-root /workspace/telluride/polycam_raw \
+  --pose-mode corrected \
+  --min-confidence 255 \
+  --orientation upright_cw
+```
+
+Pose omitted:
+
+```bash
+python scripts/run_polycam_mapanything_group.py \
+  /workspace/telluride/dataset_audit/manifest_corrected.json \
+  configs/telluride_mapanything_groups.json \
+  basement_stair_bridge \
+  /workspace/telluride/results/basement_stair_bridge/without_pose \
+  --source-root /workspace/telluride/polycam_raw \
+  --pose-mode none \
+  --min-confidence 255 \
+  --orientation upright_cw
+```
+
+Both runs retain metric depth and intrinsics. The only intended difference is
+whether corrected ARKit camera poses and pose scale are supplied.
+
+The runner enables memory-efficient inference. Add `--minibatch-size` only if
+the selected GPU needs an explicit dense-head minibatch limit.
+
+## Acceptance criteria
+
+Compare the two outputs using:
+
+- predicted versus measured depth at confidence-255 LiDAR pixels;
+- predicted camera changes relative to corrected ARKit;
+- overlap of the two staircase visits in one coordinate frame;
+- metric scaling factor;
+- confidence and non-ambiguous masks;
+- agreement with the adjacent lower-landing validation group.
+
+Pass if one configuration reconstructs one coherent staircase at metric scale
+without damaging locally correct depth surfaces. If poses preserve the 1.6 m
+split while pose-free inference merges the true geometry, omit or weaken poses
+for bridge groups only. Do not disable pose conditioning globally based on this
+single ablation.
