@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from gluemap.controllers.gluemap_impl import _build_aligned_pose_priors
 from gluemap.datasets.polycam import rotate_intrinsics_cw
 from gluemap.datasets.polycam_native import PolycamNativeStarDataset
 
@@ -150,51 +149,3 @@ def test_native_dataset_accepts_sparse_overlapping_group_cover(tmp_path: Path):
     assert dataset.stars[0].tolist() == [1, 0, 2]
     assert dataset.stars[1].tolist() == [3, 2, 4]
     assert dataset.group_coverage.tolist() == [1, 1, 2, 1, 1]
-
-
-def test_pose_priors_are_aligned_to_native_similarity_gauge():
-    angle = np.deg2rad(25.0)
-    alignment_rotation = np.array(
-        [
-            [np.cos(angle), 0.0, np.sin(angle)],
-            [0.0, 1.0, 0.0],
-            [-np.sin(angle), 0.0, np.cos(angle)],
-        ]
-    )
-    alignment_scale = 1.7
-    alignment_translation = np.array([4.0, -2.0, 3.0])
-    source_centers = np.array(
-        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.5]]
-    )
-    arkit_poses = []
-    global_centers = {}
-    for index, center in enumerate(source_centers):
-        pose = np.eye(4)
-        pose[:3, 3] = center
-        arkit_poses.append(pose)
-        global_centers[index] = (
-            alignment_scale * (alignment_rotation @ center)
-            + alignment_translation
-        )
-
-    names = [f"frame_{index}.jpg" for index in range(3)]
-    priors = _build_aligned_pose_priors(
-        arkit_poses,
-        global_centers,
-        names,
-        position_sigma_m=0.2,
-        rotation_sigma_deg=3.0,
-    )
-
-    for index, name in enumerate(names):
-        np.testing.assert_allclose(
-            priors[name]["center"], global_centers[index], atol=1e-12
-        )
-        np.testing.assert_allclose(
-            priors[name]["cam_from_world_rotation"],
-            alignment_rotation.T,
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            priors[name]["center_sigma"], 0.2 * alignment_scale
-        )

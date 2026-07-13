@@ -78,10 +78,6 @@ def main() -> None:
         gt_intrinsics_path=None,
         num_refinement_iterations=2,
         fix_intrinsics=True,
-        # ARKit is a frontend vicinity/reset diagnostic, never a residual in
-        # the production reconstruction solve.
-        pose_prior_position_sigma_m=None,
-        pose_prior_rotation_sigma_deg=None,
         # P means neural prior tracks. With use_dummy_tracks=True those tracks
         # are placeholders, not observations. Refine using genuine SIFT tracks
         # and MapAnything's depth-derived virtual tracks only.
@@ -119,7 +115,6 @@ def main() -> None:
     dataset_pair = SimpleNamespace(
         intrinsics_mapping=dataset.intrinsics_mapping,
         known_intrinsics=dataset.known_intrinsics,
-        pose_priors_c2w=dataset.pose_priors_c2w,
         camera_model=dataset.camera_model,
         sequential_edges=dataset.sequential_edges,
         images_list=dataset.images_list,

@@ -10,10 +10,11 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 from lightglue import ALIKED, LightGlue
 from lightglue.utils import rbd
-from run_polycam_mapanything_group import _load_view
+from PIL import Image
 
 from gluemap.datasets.polycam import load_polycam_manifest
 
@@ -87,15 +88,15 @@ def main() -> None:
 
     def features(index: int) -> dict:
         if index not in feature_cache:
-            view = _load_view(
-                manifest["frames"][index],
-                args.source_root,
-                min_confidence=1,
-                include_pose=False,
-                orientation="upright_cw",
-            )
+            frame = manifest["frames"][index]
+            with Image.open(args.source_root / frame["paths"]["rgb"]) as source:
+                image_upright = source.convert("RGB").transpose(
+                    Image.Transpose.ROTATE_270
+                )
             image = cv2.resize(
-                view["img"], (384, 512), interpolation=cv2.INTER_AREA
+                np.asarray(image_upright),
+                (384, 512),
+                interpolation=cv2.INTER_AREA,
             )
             tensor = (
                 torch.from_numpy(image).permute(2, 0, 1).float().cuda() / 255.0
