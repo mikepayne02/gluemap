@@ -299,7 +299,7 @@ class GluemapPipeline:
             predictions_dict,
             dataset_pair.intrinsics_mapping,
             dataset_pair.camera_model,
-            len(dataset),
+            dataset.N,
         )
         timing["global_mapping"] = time.perf_counter() - t0
 
@@ -429,7 +429,7 @@ class GluemapPipeline:
             global_centers=global_centers,
             global_intrinsics=global_intrinsics,
             dataset_pair=dataset_pair,
-            num_images=len(dataset),
+            num_images=dataset.N,
             use_triangulation_first=True,
             num_refinement_iterations=getattr(
                 args, "num_refinement_iterations", 2

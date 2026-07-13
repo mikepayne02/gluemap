@@ -21,7 +21,13 @@ from gluemap.datasets.star import BaseStarDataset
 
 
 class PolycamNativeStarDataset(BaseStarDataset):
-    """One native GLUEMAP anchor star per included Polycam frame."""
+    """Native GLUEMAP stars backed by an audited Polycam frame graph.
+
+    By default the base class creates one anchor star per frame.  Production
+    Telluride runs instead pass ``group_config``: an explicit overlapping
+    cover of the frame graph.  Every image must occur in at least one group,
+    but only the selected group anchors cause a MapAnything forward pass.
+    """
 
     def __init__(
         self,
@@ -31,6 +37,7 @@ class PolycamNativeStarDataset(BaseStarDataset):
         dataset_directory: Path,
         frontend_edges: Path,
         *,
+        group_config: Path | None = None,
         manifest_start: int | None = None,
         manifest_end: int | None = None,
     ) -> None:
@@ -127,6 +134,66 @@ class PolycamNativeStarDataset(BaseStarDataset):
         self.query_points = [None] * len(self.valid_edges)
         self.max_neighbors = getattr(args, "max_neighbors", 25)
         self.__post_init__()
+        if group_config is not None:
+            self._load_explicit_groups(group_config, manifest_to_native)
+
+    def _load_explicit_groups(
+        self,
+        group_config: Path,
+        manifest_to_native: dict[int, int],
+    ) -> None:
+        """Replace per-frame stars with an explicit overlapping graph cover."""
+        data = json.loads(group_config.read_text(encoding="utf-8"))
+        stars: list[np.ndarray] = []
+        names: list[str] = []
+        for group_index, group in enumerate(data["groups"]):
+            manifest_members = list(group.get("frame_indices", []))
+            for start, end in group.get("frame_ranges_inclusive", []):
+                manifest_members.extend(range(int(start), int(end) + 1))
+            manifest_members = list(dict.fromkeys(map(int, manifest_members)))
+            native_members = [
+                manifest_to_native[index]
+                for index in manifest_members
+                if index in manifest_to_native
+            ]
+            if len(native_members) < 2:
+                continue
+
+            anchor_manifest = int(
+                group.get("anchor_frame", manifest_members[0])
+            )
+            if anchor_manifest not in manifest_to_native:
+                anchor_native = native_members[0]
+            else:
+                anchor_native = manifest_to_native[anchor_manifest]
+            native_members = [
+                anchor_native,
+                *(index for index in native_members if index != anchor_native),
+            ]
+            stars.append(np.asarray(native_members, dtype=np.int64))
+            names.append(group.get("name", f"group_{group_index:04d}"))
+
+        if not stars:
+            raise ValueError(f"No usable groups in {group_config}")
+        coverage = np.zeros(self.N, dtype=np.int32)
+        for star in stars:
+            coverage[star] += 1
+        missing = np.flatnonzero(coverage == 0)
+        if len(missing):
+            missing_manifest = [
+                self.native_to_manifest[index] for index in missing
+            ]
+            raise ValueError(
+                "Explicit group cover omits manifest frames: "
+                f"{missing_manifest[:20]}"
+            )
+
+        self.stars = stars
+        self.group_names = names
+        self.image_index_to_star_index = {
+            int(star[0]): index for index, star in enumerate(stars)
+        }
+        self.group_coverage = coverage
 
     def __getitem__(self, index: int) -> dict:
         batch = super().__getitem__(index)

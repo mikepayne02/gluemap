@@ -27,6 +27,11 @@ def main() -> None:
     )
     parser.add_argument("--manifest-start", type=int)
     parser.add_argument("--manifest-end", type=int)
+    parser.add_argument(
+        "--group-config",
+        type=Path,
+        help="Explicit overlapping group cover; avoids one star per frame.",
+    )
     parser.add_argument("--max-neighbors", type=int, default=25)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--full-refinement", action="store_true")
@@ -35,10 +40,6 @@ def main() -> None:
         choices=["SV", "V"],
         default="SV",
         help="Refinement tracks: SIFT+virtual or virtual depth tracks only.",
-    )
-    parser.add_argument("--pose-prior-position-sigma-m", type=float)
-    parser.add_argument(
-        "--pose-prior-rotation-sigma-deg", type=float, default=3.0
     )
     args_cli = parser.parse_args()
 
@@ -77,8 +78,10 @@ def main() -> None:
         gt_intrinsics_path=None,
         num_refinement_iterations=2,
         fix_intrinsics=True,
-        pose_prior_position_sigma_m=args_cli.pose_prior_position_sigma_m,
-        pose_prior_rotation_sigma_deg=args_cli.pose_prior_rotation_sigma_deg,
+        # ARKit is a frontend vicinity/reset diagnostic, never a residual in
+        # the production reconstruction solve.
+        pose_prior_position_sigma_m=None,
+        pose_prior_rotation_sigma_deg=None,
         # P means neural prior tracks. With use_dummy_tracks=True those tracks
         # are placeholders, not observations. Refine using genuine SIFT tracks
         # and MapAnything's depth-derived virtual tracks only.
@@ -90,13 +93,10 @@ def main() -> None:
         args_cli.source_root,
         args_cli.dataset_directory,
         args_cli.frontend_edges,
+        group_config=args_cli.group_config,
         manifest_start=args_cli.manifest_start,
         manifest_end=args_cli.manifest_end,
     )
-    if len(dataset) != dataset.N:
-        raise RuntimeError(
-            f"Expected one star per frame, got {len(dataset)} for {dataset.N}"
-        )
     predictions, star_timing = run_star_inference(
         args,
         dataset,
@@ -133,13 +133,24 @@ def main() -> None:
         dataset,
         pairs=[tuple(map(int, pair)) for pair in dataset.pairs],
     )
+    coverage = torch.as_tensor(
+        getattr(dataset, "group_coverage", [1]), dtype=torch.int64
+    )
     summary = {
         "backend": args_cli.backend,
         "track_mode": args_cli.track_mode,
-        "pose_prior_position_sigma_m": args_cli.pose_prior_position_sigma_m,
-        "pose_prior_rotation_sigma_deg": args_cli.pose_prior_rotation_sigma_deg,
+        "pose_conditioning": False,
+        "arkit_optimization_prior": False,
         "frames": dataset.N,
         "stars": len(dataset),
+        "group_config": None
+        if args_cli.group_config is None
+        else str(args_cli.group_config),
+        "coverage": {
+            "minimum": int(coverage.min()),
+            "median": float(coverage.median()),
+            "maximum": int(coverage.max()),
+        },
         "prediction_directory": prediction_directory,
         "star_timing": star_timing,
         "postprocessing_timing": post_timing,
