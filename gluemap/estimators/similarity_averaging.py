@@ -40,9 +40,12 @@ def _initialize_parameters(
             for idx in global_rotations
         }
     else:
-        for idx in global_rotations:
-            if idx not in global_centers:
-                global_centers[idx] = np.random.rand(3).astype(np.float64)
+        missing = sorted(set(global_rotations) - set(global_centers))
+        if missing:
+            raise ValueError(
+                "Provided camera-center initialization is incomplete; "
+                f"missing {len(missing)} cameras: {missing[:20]}"
+            )
     if global_scales is None:
         global_scales = [
             np.ones((1,)).astype(np.float64) for i in range(num_ministar)

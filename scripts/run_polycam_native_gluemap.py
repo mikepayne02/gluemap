@@ -36,6 +36,11 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--full-refinement", action="store_true")
     parser.add_argument(
+        "--postprocess-only",
+        action="store_true",
+        help="Reuse star_result.pth and rebuild only the coarse global model.",
+    )
+    parser.add_argument(
         "--track-mode",
         choices=["SV", "V"],
         default="SV",
@@ -67,7 +72,7 @@ def main() -> None:
         use_dummy_tracks=True,
         resume_partial=True,
         checkpoint_every=100,
-        force_load=args_cli.full_refinement,
+        force_load=args_cli.full_refinement or args_cli.postprocess_only,
         rerun_from=None,
         coarse_only=not args_cli.full_refinement,
         output_suffix="",

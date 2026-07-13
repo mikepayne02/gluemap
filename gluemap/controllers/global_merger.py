@@ -4,6 +4,7 @@ import logging
 import networkx as nx
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation, Slerp
 
 from gluemap.estimators.intrinsics_averaging import intrinsics_averaging
 from gluemap.estimators.rotation_averaging import (
@@ -17,6 +18,88 @@ from gluemap.math.geometry import restore_identity
 from gluemap.math.mst_initialization import initialize_mst_structures
 
 logger = logging.getLogger(__name__)
+
+
+def _contiguous_runs(values: list[int]) -> list[list[int]]:
+    """Split sorted integer IDs into contiguous runs."""
+    if not values:
+        return []
+    runs = [[values[0]]]
+    for value in values[1:]:
+        if value == runs[-1][-1] + 1:
+            runs[-1].append(value)
+        else:
+            runs.append([value])
+    return runs
+
+
+def _fill_missing_rotations_temporally(
+    rotations: dict[int, np.ndarray], num_images: int
+) -> dict[int, np.ndarray]:
+    """Fill unestimated rotations from adjacent trajectory frames.
+
+    Rotation averaging can omit images whose every incident edge is rejected.
+    Identity is a dangerous fallback for those images because it creates an
+    apparently registered camera with an arbitrary orientation.  The image IDs
+    in GLUEMAP datasets follow capture order, so short missing runs are seeded
+    by SLERP between the closest estimated frames instead.
+    """
+    result = {idx: np.asarray(value).copy() for idx, value in rotations.items()}
+    known = sorted(result)
+    if not known:
+        raise RuntimeError("Rotation averaging did not estimate any camera")
+
+    missing = sorted(set(range(num_images)) - set(known))
+    for run in _contiguous_runs(missing):
+        first, last = run[0], run[-1]
+        lower = max((idx for idx in known if idx < first), default=None)
+        upper = min((idx for idx in known if idx > last), default=None)
+        if lower is not None and upper is not None:
+            interpolator = Slerp(
+                [float(lower), float(upper)],
+                Rotation.from_matrix(
+                    np.stack([result[lower], result[upper]], axis=0)
+                ),
+            )
+            interpolated = interpolator(
+                np.asarray(run, dtype=float)
+            ).as_matrix()
+            result.update(zip(run, interpolated, strict=True))
+        else:
+            reference = lower if lower is not None else upper
+            assert reference is not None
+            for idx in run:
+                result[idx] = result[reference].copy()
+    return result
+
+
+def _fill_missing_centers_temporally(
+    centers: dict[int, np.ndarray], num_images: int
+) -> dict[int, np.ndarray]:
+    """Fill unestimated centers by interpolation along capture order."""
+    result = {idx: np.asarray(value).copy() for idx, value in centers.items()}
+    known = sorted(result)
+    if not known:
+        raise RuntimeError("Camera-center initialization estimated no cameras")
+
+    missing = sorted(set(range(num_images)) - set(known))
+    for run in _contiguous_runs(missing):
+        first, last = run[0], run[-1]
+        lower = max((idx for idx in known if idx < first), default=None)
+        upper = min((idx for idx in known if idx > last), default=None)
+        if lower is not None and upper is not None:
+            denominator = float(upper - lower)
+            for idx in run:
+                alpha = (idx - lower) / denominator
+                result[idx] = (
+                    (1.0 - alpha) * result[lower] + alpha * result[upper]
+                )
+        else:
+            reference = lower if lower is not None else upper
+            assert reference is not None
+            for idx in run:
+                result[idx] = result[reference].copy()
+    return result
 
 
 class GlobalGluer:
@@ -311,10 +394,40 @@ class GlobalGluer:
 
         self._prune_invisible_pairs(predictions_dict)
 
+        missing_rotation_count = self.N - len(global_rotations)
+        if missing_rotation_count:
+            logger.warning(
+                "Temporally interpolating %d cameras omitted by rotation "
+                "averaging",
+                missing_rotation_count,
+            )
+            global_rotations = _fill_missing_rotations_temporally(
+                global_rotations, self.N
+            )
+
         # Initialize the structures by maximum spanning tree
         global_centers, global_scales = initialize_mst_structures(
             predictions_dict, global_rotations
         )
+
+        disconnected_ids = sorted(set(range(self.N)) - set(global_centers))
+        if disconnected_ids:
+            logger.warning(
+                "Temporally interpolating poses for %d cameras disconnected "
+                "from the center-initialization tree",
+                len(disconnected_ids),
+            )
+            connected_rotations = {
+                idx: rotation
+                for idx, rotation in global_rotations.items()
+                if idx not in disconnected_ids
+            }
+            global_rotations = _fill_missing_rotations_temporally(
+                connected_rotations, self.N
+            )
+            global_centers = _fill_missing_centers_temporally(
+                global_centers, self.N
+            )
 
         global_centers = similarity_averaging(
             predictions_dict,
@@ -323,6 +436,18 @@ class GlobalGluer:
             global_scales=global_scales,
             max_num_iterations=200,
         )
+        if disconnected_ids:
+            # The connected cameras move during similarity averaging, while
+            # disconnected cameras have no residuals.  Interpolate once more
+            # from the optimized neighbors so run boundaries remain smooth.
+            connected_centers = {
+                idx: center
+                for idx, center in global_centers.items()
+                if idx not in disconnected_ids
+            }
+            global_centers = _fill_missing_centers_temporally(
+                connected_centers, self.N
+            )
 
         # Prune the edges by the global rotations
         self._mark_inconsistent_edges(
@@ -334,22 +459,11 @@ class GlobalGluer:
         logger.info(f"Number of global rotations: {len(global_rotations)}")
         logger.info(f"Number of global centers: {len(global_centers)}")
         if len(global_rotations) != self.N or len(global_centers) != self.N:
-            global_rotations = {
-                i: (
-                    global_rotations[i]
-                    if i in global_rotations
-                    else np.eye(3, dtype=np.float64)
-                )
-                for i in range(self.N)
-            }
-            global_centers = {
-                i: (
-                    global_centers[i]
-                    if i in global_centers
-                    else np.zeros(3, dtype=np.float64)
-                )
-                for i in range(self.N)
-            }
+            raise RuntimeError(
+                "Global assembly produced an incomplete camera solution: "
+                f"{len(global_rotations)} rotations and "
+                f"{len(global_centers)} centers for {self.N} images"
+            )
 
         return global_rotations, global_centers
 
