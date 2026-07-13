@@ -347,6 +347,74 @@ class TestBundleAdjustmentEndToEnd:
                 reconstruction.cameras[camera_id].params, parameters
             )
 
+    def test_virtual_only_ba_has_pose_manifolds_and_fixed_gauge(self):
+        source = create_synthetic_reconstruction(
+            num_frames=6, num_points3D=80, seed=23
+        )
+        reconstruction = copy.deepcopy(source)
+        virtual_reconstruction = copy.deepcopy(source)
+        for point3d_id in list(reconstruction.point3D_ids()):
+            reconstruction.delete_point3D(point3d_id)
+
+        first_image_id = min(reconstruction.images)
+        first_pose = reconstruction.frames[
+            first_image_id
+        ].rig_from_world.params.copy()
+        scale_image_id = max(
+            (
+                image_id
+                for image_id in reconstruction.images
+                if image_id != first_image_id
+            ),
+            key=lambda image_id: np.linalg.norm(
+                reconstruction.frames[image_id].rig_from_world.params[4:]
+                - first_pose[4:]
+            ),
+        )
+        scale_pose = reconstruction.frames[
+            scale_image_id
+        ].rig_from_world.params.copy()
+        scale_component = int(
+            np.argmax(np.abs(scale_pose[4:] - first_pose[4:]))
+        )
+        intrinsics = {
+            camera_id: camera.params.copy()
+            for camera_id, camera in reconstruction.cameras.items()
+        }
+
+        reconstruction, virtual_reconstruction, summary = bundle_adjustment(
+            reconstruction,
+            virtual_reconstruction,
+            negative_depth_observations={},
+            max_num_iterations=5,
+            fix_intrinsics=True,
+        )
+
+        assert np.isfinite(summary.final_cost)
+        np.testing.assert_array_equal(
+            reconstruction.frames[first_image_id].rig_from_world.params,
+            first_pose,
+        )
+        np.testing.assert_array_equal(
+            reconstruction.frames[scale_image_id].rig_from_world.params[
+                4 + scale_component
+            ],
+            scale_pose[4 + scale_component],
+        )
+        for frame in reconstruction.frames.values():
+            np.testing.assert_allclose(
+                np.linalg.norm(frame.rig_from_world.params[:4]),
+                1.0,
+                atol=1e-10,
+            )
+        for camera_id, parameters in intrinsics.items():
+            np.testing.assert_array_equal(
+                reconstruction.cameras[camera_id].params, parameters
+            )
+        self._assert_same_cameras_and_poses(
+            virtual_reconstruction, reconstruction
+        )
+
     def test_ba_recovers_from_noise(self):
         """After adding small noise to 3D points and poses, BA should
         recover a reconstruction close to the original."""

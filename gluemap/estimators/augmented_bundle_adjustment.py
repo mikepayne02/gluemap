@@ -238,6 +238,72 @@ def _add_camera_pose_prior_residuals(
     )
 
 
+def _configure_virtual_only_problem(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    fix_intrinsics: bool,
+) -> None:
+    """Apply pose manifolds and a similarity gauge to virtual-only BA.
+
+    PyCOLMAP creates no parameter blocks when the real reconstruction has no
+    tracks. Virtual residuals subsequently add raw 7D pose blocks, but without
+    this step their quaternions are unconstrained and the reconstruction has a
+    free Sim3 gauge.
+    """
+    pose_blocks = []
+    for image_id in sorted(reconstruction.images):
+        pose = reconstruction.frames[image_id].rig_from_world.params
+        if problem.has_parameter_block(pose):
+            pose_blocks.append((image_id, pose))
+
+    if not pose_blocks:
+        raise RuntimeError(
+            "Virtual-only bundle adjustment has no camera parameter blocks"
+        )
+
+    first_image_id, first_pose = pose_blocks[0]
+    problem.set_parameter_block_constant(first_pose)
+
+    scale_image_id = None
+    scale_component = None
+    if len(pose_blocks) > 1:
+        scale_image_id, scale_pose = max(
+            pose_blocks[1:],
+            key=lambda item: float(
+                np.linalg.norm(item[1][4:] - first_pose[4:])
+            ),
+        )
+        translation_delta = np.abs(scale_pose[4:] - first_pose[4:])
+        scale_component = int(np.argmax(translation_delta))
+        problem.set_manifold(
+            scale_pose,
+            pygluemap.CreatePoseManifoldWithFixedTransComponent(
+                scale_component
+            ),
+        )
+
+    for image_id, pose in pose_blocks[1:]:
+        if image_id == scale_image_id:
+            continue
+        problem.set_manifold(pose, pygluemap.CreatePoseManifold())
+
+    num_fixed_intrinsics = 0
+    for camera in reconstruction.cameras.values():
+        if fix_intrinsics and problem.has_parameter_block(camera.params):
+            problem.set_parameter_block_constant(camera.params)
+            num_fixed_intrinsics += 1
+
+    logger.info(
+        "Configured virtual-only BA gauge: fixed image %d, fixed translation "
+        "component %s on image %s, %d pose manifolds, %d fixed intrinsics",
+        first_image_id,
+        scale_component,
+        scale_image_id,
+        len(pose_blocks),
+        num_fixed_intrinsics,
+    )
+
+
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -314,6 +380,7 @@ def bundle_adjustment(
         ba_options, ba_config, reconstruction
     )
     problem = bundle_adjuster.problem
+    virtual_only_problem = problem.num_residual_blocks() == 0
 
     logger.info(
         f"After pycolmap BA construction: "
@@ -330,6 +397,10 @@ def bundle_adjustment(
         negative_depth_observations=negative_depth_observations,
         loss_function=_pyceres_loss_function(loss_type_virtual),
     )
+    if virtual_only_problem and virtual_reconstruction is not None:
+        _configure_virtual_only_problem(
+            problem, reconstruction, fix_intrinsics=fix_intrinsics
+        )
     _add_camera_pose_prior_residuals(problem, reconstruction, pose_priors)
 
     logger.info(

@@ -161,6 +161,11 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   ablation from the original handoff. In that mode GLUEMAP skips both SIFT
   database construction and track snapping. Compare it against `SV` from the
   same cached `star_result.pth`; do not rerun MapAnything for this ablation.
+- Virtual-only BA must explicitly install quaternion manifolds, fix one camera
+  pose, fix one translation component on a well-separated second camera, and
+  keep calibrated intrinsics constant. PyCOLMAP cannot establish that gauge
+  when its real/SIFT reconstruction has zero tracks. Results produced with the
+  `Failed to fix Gauge` warning before this setup are invalid controls.
 - Corrected ARKit poses are a frontend vicinity/reset signal and a diagnostic,
   not ground truth. The normal `SV` and `V` optimization paths do not add an
   ARKit residual. Do not pass `--pose-prior-position-sigma-m` in Telluride
