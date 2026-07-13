@@ -84,6 +84,35 @@ class TestMSTInitialization:
         logger.info(f"sparse_topology max center error: {max_err:.6e}")
         assert max_err < 1e-3, f"Max center error {max_err:.6e} >= 1e-3"
 
+    def test_sparse_anchor_cover(self):
+        """Images covered only as members still receive center estimates."""
+        gt_rec = create_synthetic_reconstruction(num_frames=8, seed=102)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
+        stars = {
+            0: [image_ids[0], *image_ids[1:5]],
+            1: [image_ids[4], image_ids[3], *image_ids[5:]],
+        }
+        predictions_dict = build_predictions_dict(
+            gt_rotations,
+            gt_centers,
+            stars,
+            np.ones(len(stars)),
+            generate_points3d_virtual=True,
+        )
+
+        global_centers, global_scales = initialize_mst_structures(
+            predictions_dict, gt_rotations
+        )
+
+        assert set(global_centers) == set(image_ids)
+        assert set(global_scales) == set(stars)
+        orig_rotations = remap_to_original_ids(gt_rotations, gt_rec)
+        orig_centers = remap_to_original_ids(global_centers, gt_rec)
+        errors = evaluate_centers(gt_rec, orig_rotations, orig_centers)
+        assert max_center_error(errors) < 1e-3
+
     def test_non_uniform_scales(self):
         """Clean data, fully connected, non-uniform GT scales."""
         gt_rec = create_synthetic_reconstruction(num_frames=8, seed=200)

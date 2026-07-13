@@ -15,6 +15,57 @@ import torch
 MIN_TRI_ANGLE = 1
 
 
+def _initialize_sparse_star_cover(
+    predictions_dict: dict,
+    global_rotations: dict[int, np.ndarray],
+) -> tuple[dict[int, np.ndarray], dict[int, float]]:
+    """Initialize centers when some images are members but never star anchors.
+
+    MapAnything is conditioned with metric depth, so unit per-star scale is a
+    useful initializer.  Similarity averaging immediately following this
+    function remains responsible for jointly refining every star scale and
+    image center.
+    """
+    graph = nx.Graph()
+    graph.add_nodes_from(global_rotations)
+    displacements: dict[tuple[int, int], np.ndarray] = {}
+    for star_idx in range(len(predictions_dict["indexes"])):
+        members = predictions_dict["indexes"][star_idx]
+        anchor = members[0]
+        poses = predictions_dict["extrinsics"][star_idx][0]
+        scores = predictions_dict["pose_scores"][star_idx][0]
+        for position in range(1, len(members)):
+            if scores[position] <= 0:
+                continue
+            member = members[position]
+            rotation = poses[position, :3, :3].cpu().numpy()
+            translation = poses[position, :3, 3].cpu().numpy()
+            center_in_anchor = -rotation.T @ translation
+            displacement = global_rotations[anchor].T @ center_in_anchor
+            score = float(scores[position])
+            previous = graph.get_edge_data(anchor, member)
+            if previous is None or score > previous["weight"]:
+                graph.add_edge(anchor, member, weight=score)
+                displacements[(anchor, member)] = displacement
+                displacements[(member, anchor)] = -displacement
+
+    tree = nx.maximum_spanning_tree(graph)
+    root = 0 if 0 in tree else next(iter(tree.nodes))
+    centers = {root: np.zeros(3, dtype=np.float64)}
+    stack = [root]
+    while stack:
+        parent = stack.pop()
+        for child in tree.neighbors(parent):
+            if child in centers:
+                continue
+            centers[child] = centers[parent] + displacements[(parent, child)]
+            stack.append(child)
+    scales = {
+        star_idx: 1.0 for star_idx in range(len(predictions_dict["indexes"]))
+    }
+    return centers, scales
+
+
 def initialize_mst_structures(
     predictions_dict: dict,
     global_rotations: dict[int, np.ndarray],
@@ -84,6 +135,9 @@ def initialize_mst_structures(
             if median_angles.numel() > 0
             else np.array([])
         )
+
+    if len(node_idx_to_star_idx) < N:
+        return _initialize_sparse_star_cover(predictions_dict, global_rotations)
 
     for idx in indexes:
         poses = predictions_dict["extrinsics"][idx]
