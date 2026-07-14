@@ -62,6 +62,7 @@ def _scatter(
         np.column_stack([selected["red"], selected["green"], selected["blue"]])
         / 255.0
     )
+    colors = np.clip(0.22 + 0.78 * colors, 0.0, 1.0)
     ax.scatter(
         selected[horizontal],
         selected[vertical],
@@ -71,6 +72,27 @@ def _scatter(
         linewidths=0,
         rasterized=True,
     )
+
+
+def _robust_limits(
+    values: np.ndarray,
+    extra_values: np.ndarray | None = None,
+) -> tuple[float, float] | None:
+    values = values[np.isfinite(values)]
+    if extra_values is not None:
+        extra_values = extra_values[np.isfinite(extra_values)]
+    if values.size == 0 and (extra_values is None or extra_values.size == 0):
+        return None
+    if values.size:
+        lower, upper = np.percentile(values, [0.5, 99.5])
+    else:
+        lower, upper = float(extra_values.min()), float(extra_values.max())
+    if extra_values is not None and extra_values.size:
+        lower = min(lower, float(extra_values.min()))
+        upper = max(upper, float(extra_values.max()))
+    span = max(float(upper - lower), 0.5)
+    margin = 0.06 * span
+    return float(lower - margin), float(upper + margin)
 
 
 def main() -> None:
@@ -83,6 +105,12 @@ def main() -> None:
     parser.add_argument("--minimum-y", type=float, default=-4.8)
     parser.add_argument("--maximum-y", type=float, default=5.2)
     parser.add_argument("--maximum-points", type=int, default=2_500_000)
+    parser.add_argument(
+        "--viewpoint",
+        choices=["top-down", "bottom-up"],
+        default="top-down",
+        help="Plan-view handedness; top-down mirrors Z relative to below.",
+    )
     parser.add_argument(
         "--title",
         default="Telluride full-house fusion — floor-separated preview",
@@ -118,9 +146,27 @@ def main() -> None:
                 c="#28d7e5",
                 alpha=0.45,
             )
+        else:
+            camera_mask = None
+        selected = points[mask]
+        selected_cameras = cameras[camera_mask] if cameras is not None else None
+        x_limits = _robust_limits(
+            selected["x"],
+            None if selected_cameras is None else selected_cameras[:, 0],
+        )
+        z_limits = _robust_limits(
+            selected["z"],
+            None if selected_cameras is None else selected_cameras[:, 2],
+        )
+        if x_limits is not None:
+            ax.set_xlim(*x_limits)
+        if z_limits is not None:
+            ax.set_ylim(*z_limits)
         ax.set_title(f"{label}  ({lower:g} ≤ Y < {upper:g} m)", fontsize=16)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Z (m)")
+        if args.viewpoint == "top-down":
+            ax.invert_yaxis()
         ax.set_aspect("equal", adjustable="box")
 
     elevation = axes.flat[3]
@@ -131,6 +177,16 @@ def main() -> None:
         elevation.scatter(
             cameras[:, 0], cameras[:, 1], s=2, c="#28d7e5", alpha=0.45
         )
+    elevation_x_limits = _robust_limits(
+        points["x"][finite], None if cameras is None else cameras[:, 0]
+    )
+    elevation_y_limits = _robust_limits(
+        points["y"][finite], None if cameras is None else cameras[:, 1]
+    )
+    if elevation_x_limits is not None:
+        elevation.set_xlim(*elevation_x_limits)
+    if elevation_y_limits is not None:
+        elevation.set_ylim(*elevation_y_limits)
     elevation.set_title("Elevation and slice boundaries", fontsize=16)
     elevation.set_xlabel("X (m)")
     elevation.set_ylabel("Y (m)")
