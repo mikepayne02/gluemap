@@ -29,32 +29,35 @@ This result does not justify disabling pose conditioning everywhere.
 1. Pose-relation confidence filtering may affect global camera averaging only.
    It must never delete an image, LiDAR observation, or MapAnything virtual
    track from the refinement input.
-2. If a camera lacks a supported MapAnything pose relationship, initialize it
-   from the aligned corrected ARKit trajectory. Never replace a missing run by
-   a straight line when the measured trajectory exists.
-3. Use ARKit gravity during coarse assembly and bundle adjustment. Gravity
-   constraints must not constrain yaw or translation.
+2. Every production camera must have a supported MapAnything relationship.
+   Missing rotations or centers are fatal validation errors; production must
+   not silently interpolate them from either ARKit or capture order.
+3. ARKit gravity may orient the completed model once for export and viewing.
+   It is not a per-camera bundle-adjustment residual.
 4. Do not add absolute ARKit position residuals to the final optimization.
-5. Pose conditioning is group-local and explicit. The default selective mode
-   supplies at most eight corrected poses near the group anchor. Distant
-   revisit members remain unposed so MapAnything can correct accumulated
-   drift. Known unreliable anchor ranges remain entirely pose-free.
+5. The current production group cover is pose-free. ARKit participates in
+   reset correction and frontend vicinity proposals, not MapAnything
+   conditioning or global optimization.
 6. Frame 1124 is excluded from every dataset and run.
 7. Calibrated intrinsics remain fixed during bundle adjustment.
-8. Do not start a multi-hour refinement until the complete 3,119-camera coarse
-   model and measured-LiDAR floor/elevation previews are coherent.
+8. Metric-depth-conditioned groups keep one common scale. Spanning-tree scale
+   ratios are initialization artifacts and must not rescale individual groups.
+9. Use score-weighted Ceres rotation averaging. The PyCOLMAP rotation pass
+   disconnected 56 otherwise supported cameras in the 130-group production
+   cover and is not an accepted production path.
+10. Do not start refinement until the complete 3,119-camera coarse model passes
+   measured-LiDAR revisit checks and floor/elevation previews are coherent.
+11. Production refinement is virtual/neural only (`V`). SIFT is excluded from
+   both the camera objective and the delivered COLMAP point cloud.
 
 ## Current artifacts
 
-- Pose-free full-house MapAnything cache:
-  `/workspace/telluride/results/fullhouse_depth64/star_result.pth`
-- Original 134-group cover:
-  `/workspace/telluride/inputs/fullhouse_groups_mapanything_depth64.json`
-- Selective-pose version of the same cover:
-  `/workspace/telluride/inputs/fullhouse_groups_mapanything_depth64_sparse_pose.json`
+- Active replacement output:
+  `/workspace/telluride/results/fullhouse_rebuild`
+- Audited 130-group production cover:
+  `/workspace/telluride/inputs/fullhouse_groups_rebuild.json`
 - Corrected manifest:
   `/workspace/telluride/inputs/manifest_corrected.json`
 
-The cached pose-free inference remains useful. Selective pose inference must be
-written to a distinct final result directory until its complete coarse model is
-validated; it must not partially overwrite the pose-free cache.
+The previous caches remain diagnostic baselines only. They must not overwrite
+or initialize the active replacement result.

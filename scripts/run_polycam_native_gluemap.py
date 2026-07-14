@@ -78,11 +78,23 @@ def main() -> None:
         output_suffix="",
         valid_pose_threshold=0.05,
         is_sequential=True,
-        use_ceres_rotation_averaging=False,
+        # The score-weighted Ceres solver preserves reliable local group
+        # rotations. PyCOLMAP's unweighted robust pass can discard every
+        # incident edge for short camera runs when two overlapping groups
+        # disagree, leaving otherwise valid cameras unsupported.
+        use_ceres_rotation_averaging=True,
         use_gt_intrinsics=False,
         gt_intrinsics_path=None,
         num_refinement_iterations=2,
         fix_intrinsics=True,
+        # Metric LiDAR conditioning gives every local prediction the same
+        # physical scale.  Do not let global assembly shear groups by fitting
+        # an independent arbitrary scale for each one.
+        fix_group_scales=True,
+        # Every production camera must be supported by MapAnything group
+        # relationships. Never invent missing poses from ARKit or interpolation.
+        allow_trajectory_fallback=False,
+        require_complete_camera_support=True,
         # P means neural prior tracks. With use_dummy_tracks=True those tracks
         # are placeholders, not observations. Refine using genuine SIFT tracks
         # and MapAnything's depth-derived virtual tracks only.

@@ -15,9 +15,6 @@ from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.twoview_inference import run_twoview_inference
 from gluemap.datasets.star import BaseStarDataset
 from gluemap.datasets.twoview import BaseTwoViewDataset
-from gluemap.estimators.group_pose_constraints import (
-    build_group_pose_constraints,
-)
 from gluemap.estimators.rotation_averaging import (
     collect_relative_rotations_ministar,
 )
@@ -78,29 +75,6 @@ def _apply_group_scales(predictions_dict: dict, scales: list[float]) -> None:
             )
         predictions_dict["points3d_virtual"][star_index] /= scale
         predictions_dict["extrinsics"][star_index][:, :, :3, 3:] /= scale
-
-
-def _build_gravity_priors(
-    dataset_pair,
-    gravity_world: np.ndarray | None,
-    angular_sigma_deg: float = 0.5,
-) -> dict | None:
-    """Build gravity-only BA constraints from corrected ARKit orientation."""
-    priors_c2w = getattr(dataset_pair, "pose_priors_c2w", None)
-    if gravity_world is None or priors_c2w is None:
-        return None
-    arkit_world_gravity = np.array([0.0, 1.0, 0.0])
-    return {
-        image_name: {
-            "world_gravity": np.asarray(gravity_world, dtype=np.float64),
-            "camera_gravity": np.asarray(prior, dtype=np.float64)[:3, :3].T
-            @ arkit_world_gravity,
-            "angular_sigma": np.deg2rad(angular_sigma_deg),
-        }
-        for image_name, prior in zip(
-            dataset_pair.images_list, priors_c2w, strict=True
-        )
-    }
 
 
 class GluemapPipeline:
@@ -296,23 +270,12 @@ class GluemapPipeline:
         pose_graph_predictions = _copy_predictions_for_global_mapping(
             predictions_dict
         )
-        trusted_loop_edges = set(
-            getattr(dataset_pair, "trusted_loop_edges", set())
-        )
-        if hasattr(dataset, "group_coverage"):
-            pose_graph_predictions["pose_constraints"] = (
-                build_group_pose_constraints(
-                    pose_graph_predictions,
-                    trusted_loop_edges,
-                    list(dataset_pair.pose_priors_c2w),
-                    set(getattr(dataset_pair, "trajectory_break_edges", set())),
-                )
-            )
+        trajectory_priors = None
+        if getattr(args, "allow_trajectory_fallback", False):
+            trajectory_priors = getattr(dataset_pair, "pose_priors_c2w", None)
         global_gluer = GlobalGluer(
             args,
-            trajectory_priors_c2w=getattr(
-                dataset_pair, "pose_priors_c2w", None
-            ),
+            trajectory_priors_c2w=trajectory_priors,
         )
         global_gluer.sequential_edges = set(
             getattr(dataset_pair, "sequential_edges", [])
@@ -330,9 +293,6 @@ class GluemapPipeline:
             dataset.N,
         )
         timing["global_mapping"] = time.perf_counter() - t0
-        gravity_priors = _build_gravity_priors(
-            dataset_pair, global_gluer.gravity_world
-        )
         if "solved_group_scales" in pose_graph_predictions:
             _apply_group_scales(
                 predictions_dict,
@@ -466,7 +426,7 @@ class GluemapPipeline:
             ),
             track_mode=track_mode,
             pose_priors=None,
-            gravity_priors=gravity_priors,
+            gravity_priors=None,
         )
         timing["refinement"] = time.perf_counter() - t0
         timing["refinement_detail"] = refinement_timing

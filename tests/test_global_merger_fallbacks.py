@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
+import gluemap.controllers.global_merger as global_merger
 from gluemap.controllers.global_merger import (
     GlobalGluer,
     _estimate_trajectory_gravity,
@@ -13,6 +14,47 @@ from gluemap.controllers.global_merger import (
     _fill_missing_centers_temporally,
     _fill_missing_rotations_temporally,
 )
+
+
+def test_metric_groups_ignore_mst_scale_ratios(monkeypatch):
+    predictions = {"indexes": [[0, 1], [1, 0]]}
+    rotations = {0: np.eye(3), 1: np.eye(3)}
+    centers = {0: np.zeros(3), 1: np.ones(3)}
+    captured = {}
+
+    monkeypatch.setattr(
+        global_merger,
+        "rotation_averaging_pycolmap",
+        lambda *args, **kwargs: rotations,
+    )
+    monkeypatch.setattr(
+        global_merger,
+        "initialize_mst_structures",
+        lambda *args, **kwargs: (centers, {0: 0.7, 1: 1.4}),
+    )
+
+    def capture_scales(*args, **kwargs):
+        captured.update(kwargs["global_scales"])
+        return centers
+
+    monkeypatch.setattr(global_merger, "similarity_averaging", capture_scales)
+    gluer = GlobalGluer(
+        SimpleNamespace(
+            valid_pose_threshold=0.05,
+            is_sequential=False,
+            use_ceres_rotation_averaging=False,
+            fix_group_scales=True,
+            require_complete_camera_support=True,
+        )
+    )
+    gluer.N = 2
+    monkeypatch.setattr(gluer, "_filter_invalid_edges", lambda *args: None)
+    monkeypatch.setattr(gluer, "_prune_invisible_pairs", lambda *args: None)
+    monkeypatch.setattr(gluer, "_mark_inconsistent_edges", lambda *args: None)
+
+    gluer._global_structure_estimation(predictions)
+
+    assert captured == {0: 1.0, 1: 1.0}
 
 
 def test_rotation_filter_never_drops_adjacent_trajectory_odometry():

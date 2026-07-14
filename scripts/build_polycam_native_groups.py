@@ -11,7 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
-from gluemap.pairing.pose_depth_graph import build_graph_groups
+from gluemap.pairing.pose_depth_graph import (
+    build_graph_groups,
+    build_verified_bridge_groups,
+    frontend_edge_is_group_evidence,
+)
 
 
 def main() -> None:
@@ -22,9 +26,6 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--group-size", type=int, default=64)
     parser.add_argument("--minimum-memberships", type=int, default=2)
-    parser.add_argument(
-        "--max-nontemporal-height-difference-m", type=float, default=1.25
-    )
     parser.add_argument(
         "--sparse-pose-conditioning",
         action="store_true",
@@ -44,29 +45,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    heights = {
-        index: float(frame["corrected_c2w_opencv"][1][3])
-        for index, frame in enumerate(manifest["frames"])
-    }
     mapping = json.loads(args.index_mapping.read_text(encoding="utf-8"))
     manifest_indices = [int(row["manifest_index"]) for row in mapping]
     included = set(manifest_indices)
     edges = []
-    rejected_cross_floor = 0
+    verified_edges = []
+    rejected_without_image_evidence = 0
     with args.frontend_edges.open(newline="", encoding="utf-8") as stream:
         for row in csv.DictReader(stream):
             first, second = int(row["first"]), int(row["second"])
             if first not in included or second not in included:
                 continue
-            reason = row["acceptance_reason"]
-            if (
-                reason != "temporal"
-                and abs(heights[first] - heights[second])
-                > args.max_nontemporal_height_difference_m
-            ):
-                rejected_cross_floor += 1
+            if not frontend_edge_is_group_evidence(row):
+                rejected_without_image_evidence += 1
                 continue
+            reason = row["acceptance_reason"]
             edges.append(
                 {
                     "first": first,
@@ -75,12 +68,19 @@ def main() -> None:
                     "score": float(row["score"]),
                 }
             )
+            if reason == "manually_verified":
+                verified_edges.append(row)
+
+    bridge_groups = build_verified_bridge_groups(
+        manifest_indices, verified_edges, group_size=args.group_size
+    )
 
     groups = build_graph_groups(
         manifest_indices,
         edges,
         group_size=args.group_size,
         minimum_memberships=args.minimum_memberships,
+        seeded_groups=bridge_groups,
     )
     exclusions = []
     for value in args.pose_exclusion:
@@ -130,10 +130,11 @@ def main() -> None:
             "source": "audited_frontend_graph_cover",
             "group_size": args.group_size,
             "minimum_memberships": args.minimum_memberships,
-            "max_nontemporal_height_difference_m": (
-                args.max_nontemporal_height_difference_m
+            "non_temporal_policy": "image_verified_or_manual",
+            "rejected_without_image_evidence": (
+                rejected_without_image_evidence
             ),
-            "rejected_cross_floor_edges": rejected_cross_floor,
+            "verified_bridge_groups": len(bridge_groups),
             "frontend_edges": str(args.frontend_edges),
             "pose_anchor_radius": args.pose_anchor_radius,
             "max_pose_views": args.max_pose_views,

@@ -154,13 +154,9 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   adjustment keeps those calibration parameter blocks fixed. Camera motion
   must not be hidden as a per-frame focal-length change.
 - `use_dummy_tracks=True` avoids loading VGGSfM. Those repeated query points
-  are interface placeholders, not real cross-view tracks. Native refinement
-  therefore skips track snapping and uses `track_mode=SV`: real SIFT tracks
-  plus MapAnything depth-derived virtual tracks, with no dummy prior tracks.
-- A virtual-only `track_mode=V` refinement is the controlled neural/depth
-  ablation from the original handoff. In that mode GLUEMAP skips both SIFT
-  database construction and track snapping. Compare it against `SV` from the
-  same cached `star_result.pth`; do not rerun MapAnything for this ablation.
+  are interface placeholders, not real cross-view tracks. Production uses
+  `track_mode=V`, so GLUEMAP skips SIFT construction and track snapping and
+  refines only MapAnything depth-derived virtual tracks.
 - Virtual-only BA must explicitly install quaternion manifolds, fix one camera
   pose, fix one translation component on a well-separated second camera, and
   keep calibrated intrinsics constant. PyCOLMAP cannot establish that gauge
@@ -171,6 +167,12 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   ARKit residual. Do not pass `--pose-prior-position-sigma-m` in Telluride
   production runs; differences after diagnostic Sim3 alignment must be called
   ARKit disagreement, not camera error.
+- Production global assembly requires every camera to retain MapAnything group
+  support. ARKit and temporal interpolation fallbacks are disabled; an
+  unsupported camera fails the run instead of receiving an invented pose.
+- Metric-depth-conditioned groups all use scale 1.0 during similarity
+  averaging. Do not freeze noisy spanning-tree scale ratios as per-group
+  scales.
 - A validated 48-frame native run is preserved at
   `/workspace/telluride/results/native_integration_1700_1747`. After one
   diagnostic Sim3 to ARKit its camera-center errors were 2.08 cm median,

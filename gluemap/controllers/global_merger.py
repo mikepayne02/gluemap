@@ -276,6 +276,10 @@ class GlobalGluer:
         )
         self.trajectory_priors_c2w = trajectory_priors_c2w
         self.gravity_world = None
+        self.fix_group_scales = getattr(args, "fix_group_scales", False)
+        self.require_complete_support = getattr(
+            args, "require_complete_camera_support", False
+        )
 
     def main(
         self,
@@ -545,6 +549,12 @@ class GlobalGluer:
 
         missing_rotation_count = self.N - len(global_rotations)
         if missing_rotation_count:
+            if self.require_complete_support:
+                missing = sorted(set(range(self.N)) - set(global_rotations))
+                raise RuntimeError(
+                    "Rotation averaging left cameras without group support: "
+                    f"{missing[:20]} ({len(missing)} total)"
+                )
             if self.trajectory_priors_c2w is None:
                 logger.warning(
                     "Temporally interpolating %d cameras omitted by rotation "
@@ -576,6 +586,12 @@ class GlobalGluer:
 
         disconnected_ids = sorted(set(range(self.N)) - set(global_centers))
         if disconnected_ids:
+            if self.require_complete_support:
+                raise RuntimeError(
+                    "Center initialization left cameras without group "
+                    f"support: {disconnected_ids[:20]} "
+                    f"({len(disconnected_ids)} total)"
+                )
             logger.info(
                 "Initializing poses for %d cameras disconnected from the "
                 "center-initialization tree",
@@ -604,12 +620,22 @@ class GlobalGluer:
                     self.N,
                 )
 
+        averaging_scales = global_scales
+        if self.fix_group_scales:
+            # Metric-depth-conditioned groups already share physical units.
+            # MST scale ratios are only an initialization artifact and must
+            # not become frozen per-group deformations.
+            averaging_scales = {
+                star_index: 1.0
+                for star_index in range(len(predictions_dict["indexes"]))
+            }
         global_centers = similarity_averaging(
             predictions_dict,
             global_rotations,
             global_centers=global_centers,
-            global_scales=global_scales,
+            global_scales=averaging_scales,
             max_num_iterations=200,
+            fix_scales=self.fix_group_scales,
         )
         if disconnected_ids:
             # The connected cameras move during similarity averaging, while

@@ -39,7 +39,9 @@ def load_depth_frame(
     intrinsics = np.asarray(frame["intrinsics_depth"], dtype=np.float64)
     c2w = np.asarray(frame["corrected_c2w_opencv"], dtype=np.float64)
 
-    yy, xx = np.mgrid[0 : depth.shape[0] : pixel_step, 0 : depth.shape[1] : pixel_step]
+    yy, xx = np.mgrid[
+        0 : depth.shape[0] : pixel_step, 0 : depth.shape[1] : pixel_step
+    ]
     zz = depth[yy, xx]
     valid = (
         np.isfinite(zz)
@@ -131,7 +133,9 @@ def build_pose_depth_edges(
         for second in indices[offset + 1 : offset + 1 + temporal_neighbors]:
             if second - first > temporal_neighbors:
                 break
-            distance = float(np.linalg.norm(by_index[first].center - by_index[second].center))
+            distance = float(
+                np.linalg.norm(by_index[first].center - by_index[second].center)
+            )
             edges[(first, second)] = {
                 "first": first,
                 "second": second,
@@ -141,7 +145,9 @@ def build_pose_depth_edges(
             }
 
     centers = np.stack([by_index[index].center for index in indices])
-    for first_offset, second_offset in cKDTree(centers).query_pairs(spatial_radius_m):
+    for first_offset, second_offset in cKDTree(centers).query_pairs(
+        spatial_radius_m
+    ):
         first, second = indices[first_offset], indices[second_offset]
         if (first, second) in edges:
             continue
@@ -159,7 +165,9 @@ def build_pose_depth_edges(
             absolute_tolerance_m=absolute_tolerance_m,
             relative_tolerance=relative_tolerance,
         )
-        mean_overlap = 0.5 * (float(forward["ratio"]) + float(backward["ratio"]))
+        mean_overlap = 0.5 * (
+            float(forward["ratio"]) + float(backward["ratio"])
+        )
         if (
             int(forward["consistent"]) < min_bidirectional_points
             or int(backward["consistent"]) < min_bidirectional_points
@@ -168,7 +176,9 @@ def build_pose_depth_edges(
             or mean_overlap < min_mean_overlap
         ):
             continue
-        distance = float(np.linalg.norm(by_index[first].center - by_index[second].center))
+        distance = float(
+            np.linalg.norm(by_index[first].center - by_index[second].center)
+        )
         edges[(first, second)] = {
             "first": first,
             "second": second,
@@ -185,7 +195,9 @@ def build_pose_depth_edges(
     return list(edges.values())
 
 
-def add_verified_edges(edges: list[dict], verified_pairs: list[tuple[int, int]]) -> None:
+def add_verified_edges(
+    edges: list[dict], verified_pairs: list[tuple[int, int]]
+) -> None:
     existing = {(edge["first"], edge["second"]) for edge in edges}
     for first, second in verified_pairs:
         first, second = sorted((int(first), int(second)))
@@ -201,7 +213,9 @@ def add_verified_edges(edges: list[dict], verified_pairs: list[tuple[int, int]])
             )
 
 
-def _adjacency(edges: list[dict], valid_indices: set[int]) -> dict[int, dict[int, float]]:
+def _adjacency(
+    edges: list[dict], valid_indices: set[int]
+) -> dict[int, dict[int, float]]:
     adjacency = {index: {} for index in valid_indices}
     for edge in edges:
         first, second = edge["first"], edge["second"]
@@ -209,9 +223,119 @@ def _adjacency(edges: list[dict], valid_indices: set[int]) -> dict[int, dict[int
             continue
         score = max(float(edge["score"]), 1e-4)
         cost = 1.0 / score
-        adjacency[first][second] = min(adjacency[first].get(second, np.inf), cost)
-        adjacency[second][first] = min(adjacency[second].get(first, np.inf), cost)
+        adjacency[first][second] = min(
+            adjacency[first].get(second, np.inf), cost
+        )
+        adjacency[second][first] = min(
+            adjacency[second].get(first, np.inf), cost
+        )
     return adjacency
+
+
+def frontend_edge_is_group_evidence(edge: dict) -> bool:
+    """Return whether an audited edge may place two views in one group.
+
+    Temporal continuity is always retained.  A non-temporal edge must have
+    independent image evidence, or be one of the explicitly verified loops.
+    Depth overlap computed from a drifted pose is not sufficient by itself.
+    """
+    if edge["acceptance_reason"] in {"temporal", "manually_verified"}:
+        return True
+    visual_inliers = int(edge.get("visual_inliers") or 0)
+    visual_ratio = float(edge.get("visual_inlier_ratio") or 0.0)
+    return visual_inliers >= 15 and visual_ratio >= 0.30
+
+
+def build_verified_bridge_groups(
+    indices: list[int], verified_edges: list[dict], *, group_size: int = 64
+) -> list[dict]:
+    """Build joint local groups around every manually verified revisit.
+
+    Nearby verified endpoints are treated as one visit.  Each physical visit
+    receives an equal temporal neighborhood, so the resulting MapAnything
+    call directly observes both sides of the closure instead of hoping that a
+    later feature matcher rediscovers it.
+    """
+    valid = set(indices)
+    graph: dict[int, set[int]] = {}
+    pairs = []
+    for edge in verified_edges:
+        first, second = sorted((int(edge["first"]), int(edge["second"])))
+        if first not in valid or second not in valid:
+            continue
+        graph.setdefault(first, set()).add(second)
+        graph.setdefault(second, set()).add(first)
+        pairs.append((first, second))
+
+    components = []
+    remaining = set(graph)
+    while remaining:
+        root = min(remaining)
+        stack = [root]
+        component = set()
+        while stack:
+            node = stack.pop()
+            if node in component:
+                continue
+            component.add(node)
+            stack.extend(graph[node] - component)
+        remaining -= component
+        components.append(sorted(component))
+
+    groups = []
+    sorted_indices = sorted(indices)
+    for group_index, component in enumerate(components):
+        visits: list[list[int]] = []
+        for endpoint in component:
+            if not visits or endpoint - visits[-1][-1] > 32:
+                visits.append([endpoint])
+            else:
+                visits[-1].append(endpoint)
+        centers = [int(round(np.mean(visit))) for visit in visits]
+        quota, remainder = divmod(group_size, len(centers))
+        members = set(component)
+        for visit_index, center in enumerate(centers):
+            count = quota + (visit_index < remainder)
+            candidates = sorted(
+                sorted_indices, key=lambda index: (abs(index - center), index)
+            )
+            members.update(candidates[:count])
+        if len(members) > group_size:
+            mandatory = set(component)
+            optional = sorted(
+                members - mandatory,
+                key=lambda index: (
+                    min(abs(index - center) for center in centers),
+                    index,
+                ),
+            )
+            members = mandatory | set(optional[: group_size - len(mandatory)])
+        elif len(members) < group_size:
+            candidates = sorted(
+                (index for index in sorted_indices if index not in members),
+                key=lambda index: (
+                    min(abs(index - center) for center in centers),
+                    index,
+                ),
+            )
+            members.update(candidates[: group_size - len(members)])
+        component_pairs = [
+            list(pair)
+            for pair in pairs
+            if pair[0] in component and pair[1] in component
+        ]
+        groups.append(
+            {
+                "name": f"verified_bridge_{group_index:03d}",
+                "kind": "verified_bridge",
+                "anchor_frame": component[0],
+                "frame_indices": sorted(members),
+                "verified_correspondences": component_pairs,
+                "expected_view_count": len(members),
+                "pose_modes": ["none"],
+            }
+        )
+    return groups
 
 
 def build_graph_groups(
@@ -228,9 +352,13 @@ def build_graph_groups(
     groups = []
     for source in seeded_groups or []:
         group = dict(source)
-        members = []
-        for start, end in group["frame_ranges_inclusive"]:
+        members = list(map(int, group.get("frame_indices", [])))
+        for start, end in group.get("frame_ranges_inclusive", []):
             members.extend(range(start, end + 1))
+        members = list(
+            dict.fromkeys(index for index in members if index in valid_indices)
+        )
+        group["frame_indices"] = members
         group["kind"] = "verified_bridge"
         group["pose_modes"] = ["none"]
         group["expected_view_count"] = len(members)
@@ -259,7 +387,9 @@ def build_graph_groups(
             members_list.extend(temporal_fill[: group_size - len(members_list)])
         members = tuple(sorted(members_list))
         previous = candidates.get(members)
-        if previous is None or len(adjacency[anchor]) > len(adjacency[previous]):
+        if previous is None or len(adjacency[anchor]) > len(
+            adjacency[previous]
+        ):
             candidates[members] = anchor
 
     remaining = dict(candidates)
