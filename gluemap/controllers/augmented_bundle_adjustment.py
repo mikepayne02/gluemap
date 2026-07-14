@@ -245,6 +245,9 @@ class IterativeBAOptions:
     # Optional absolute camera priors keyed by image name.
     pose_priors: dict | None = None
 
+    # Optional gravity-only camera constraints keyed by image name.
+    gravity_priors: dict | None = None
+
     # Whether to filter virtual points same as real tracks
     filter_virtual_points: bool = True
 
@@ -556,6 +559,7 @@ def iterative_bundle_adjustment(
             max_num_iterations=options.max_ba_iterations,
             fix_intrinsics=options.fix_intrinsics,
             pose_priors=options.pose_priors,
+            gravity_priors=options.gravity_priors,
         )
 
         # Inner loop: filter and tighten threshold when too few tracks filtered

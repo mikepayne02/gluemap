@@ -120,8 +120,13 @@ def main() -> None:
     dataset_pair = SimpleNamespace(
         intrinsics_mapping=dataset.intrinsics_mapping,
         known_intrinsics=dataset.known_intrinsics,
+        pose_priors_c2w=dataset.pose_priors_c2w,
         camera_model=dataset.camera_model,
         sequential_edges=dataset.sequential_edges,
+        trusted_loop_edges=getattr(dataset, "trusted_loop_edges", set()),
+        trajectory_break_edges=getattr(
+            dataset, "trajectory_break_edges", set()
+        ),
         images_list=dataset.images_list,
         images_path=dataset.images_path,
         images_shape_ori=dataset.images_shape_ori,
@@ -131,15 +136,23 @@ def main() -> None:
         predictions,
         dataset_pair,
         dataset,
-        pairs=[tuple(map(int, pair)) for pair in dataset.pairs],
+        pairs=[
+            tuple(map(int, pair))
+            for pair in getattr(dataset, "refinement_edges", dataset.pairs)
+        ],
     )
     coverage = torch.as_tensor(
         getattr(dataset, "group_coverage", [1]), dtype=torch.int64
     )
+    conditioned_groups = sum(
+        bool(members)
+        for members in getattr(dataset, "group_pose_conditioned_members", [])
+    )
     summary = {
         "backend": args_cli.backend,
         "track_mode": args_cli.track_mode,
-        "pose_conditioning": False,
+        "pose_conditioning": conditioned_groups > 0,
+        "pose_conditioned_groups": conditioned_groups,
         "arkit_optimization_prior": False,
         "frames": dataset.N,
         "stars": len(dataset),

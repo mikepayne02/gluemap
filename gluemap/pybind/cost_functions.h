@@ -108,6 +108,37 @@ private:
 };
 
 // ----------------------------------------
+// GravityDirectionError
+// ----------------------------------------
+// Constrains only the gravity direction of a COLMAP cam_from_world pose.
+// Rotation about gravity (yaw) and all translation remain unconstrained.
+struct GravityDirectionError
+    : public colmap::AutoDiffCostFunctor<GravityDirectionError, 3, 7> {
+  GravityDirectionError(const Eigen::Vector3d &world_gravity,
+                        const Eigen::Vector3d &camera_gravity,
+                        const double angular_sigma)
+      : world_gravity_(world_gravity.normalized()),
+        camera_gravity_(camera_gravity.normalized()),
+        inverse_sigma_(1.0 / angular_sigma) {}
+
+  template <typename T>
+  bool operator()(const T *const cam_from_world, T *residuals) const {
+    const Eigen::Map<const Eigen::Quaternion<T>> rotation(cam_from_world);
+    const Eigen::Matrix<T, 3, 1> predicted =
+        rotation * world_gravity_.cast<T>();
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> residual_vector(residuals);
+    residual_vector = T(inverse_sigma_) *
+                      (predicted - camera_gravity_.cast<T>());
+    return true;
+  }
+
+private:
+  const Eigen::Vector3d world_gravity_;
+  const Eigen::Vector3d camera_gravity_;
+  const double inverse_sigma_;
+};
+
+// ----------------------------------------
 // ReprojErrorCostWithNegativeDepthFunctor
 // ----------------------------------------
 // Standard bundle adjustment cost function for variable

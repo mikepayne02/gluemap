@@ -25,6 +25,23 @@ def main() -> None:
     parser.add_argument(
         "--max-nontemporal-height-difference-m", type=float, default=1.25
     )
+    parser.add_argument(
+        "--sparse-pose-conditioning",
+        action="store_true",
+        help=(
+            "Condition only a short temporal neighborhood around each group "
+            "anchor; nonlocal revisit members remain free to correct drift."
+        ),
+    )
+    parser.add_argument("--pose-anchor-radius", type=int, default=12)
+    parser.add_argument("--max-pose-views", type=int, default=8)
+    parser.add_argument(
+        "--pose-exclusion",
+        action="append",
+        default=[],
+        metavar="START:END",
+        help="Inclusive manifest range whose group anchors remain pose-free.",
+    )
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -65,6 +82,37 @@ def main() -> None:
         group_size=args.group_size,
         minimum_memberships=args.minimum_memberships,
     )
+    exclusions = []
+    for value in args.pose_exclusion:
+        start, end = map(int, value.split(":"))
+        exclusions.append((min(start, end), max(start, end)))
+    if args.sparse_pose_conditioning:
+        for group in groups:
+            anchor = int(group["anchor_frame"])
+            if any(start <= anchor <= end for start, end in exclusions):
+                group["pose_conditioned_frames"] = []
+                continue
+            local_members = sorted(
+                int(frame)
+                for frame in group["frame_indices"]
+                if abs(int(frame) - anchor) <= args.pose_anchor_radius
+            )
+            if anchor not in local_members:
+                local_members.insert(0, anchor)
+            if len(local_members) > args.max_pose_views:
+                positions = (
+                    np.linspace(0, len(local_members) - 1, args.max_pose_views)
+                    .round()
+                    .astype(int)
+                )
+                local_members = [
+                    local_members[position] for position in positions
+                ]
+                if anchor not in local_members:
+                    local_members[0] = anchor
+            group["pose_conditioned_frames"] = list(
+                dict.fromkeys([anchor, *local_members])
+            )
     coverage = Counter()
     for group in groups:
         coverage.update(map(int, group["frame_indices"]))
@@ -76,7 +124,7 @@ def main() -> None:
             "rgb": True,
             "intrinsics": True,
             "metric_depth": True,
-            "poses": False,
+            "poses": "sparse_local" if args.sparse_pose_conditioning else False,
         },
         "construction": {
             "source": "audited_frontend_graph_cover",
@@ -87,6 +135,9 @@ def main() -> None:
             ),
             "rejected_cross_floor_edges": rejected_cross_floor,
             "frontend_edges": str(args.frontend_edges),
+            "pose_anchor_radius": args.pose_anchor_radius,
+            "max_pose_views": args.max_pose_views,
+            "pose_exclusions": exclusions,
         },
         "coverage": {
             "frames": len(manifest_indices),

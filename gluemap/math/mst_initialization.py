@@ -10,6 +10,8 @@ import networkx as nx
 import numpy as np
 import torch
 
+from gluemap.estimators.group_pose_constraints import iter_pose_constraints
+
 # Minimum median triangulation angle (degrees) for an edge's relative scale
 # to be considered reliable; below this we fall back to a unit scale ratio.
 MIN_TRI_ANGLE = 1
@@ -66,6 +68,46 @@ def _initialize_sparse_star_cover(
     return centers, scales
 
 
+def _initialize_group_cover(
+    predictions_dict: dict,
+    global_rotations: dict[int, np.ndarray],
+) -> tuple[dict[int, np.ndarray], dict[int, float]]:
+    """Initialize an overlapping group cover from its explicit constraints."""
+    graph = nx.Graph()
+    graph.add_nodes_from(global_rotations)
+    displacements = {}
+    for constraint in iter_pose_constraints(predictions_dict):
+        if constraint["kind"] == "trajectory_rotation_bridge":
+            continue
+        first, second = constraint["first"], constraint["second"]
+        relative_pose = constraint["pose"].cpu().double()
+        displacement = (
+            -torch.from_numpy(global_rotations[second]).T @ relative_pose[:3, 3]
+        ).numpy()
+        previous = graph.get_edge_data(first, second)
+        if previous is None or constraint["score"] > previous["weight"]:
+            graph.add_edge(first, second, weight=constraint["score"])
+            displacements[(first, second)] = displacement
+            displacements[(second, first)] = -displacement
+
+    tree = nx.maximum_spanning_tree(graph)
+    root = 0
+    centers = {root: np.zeros(3, dtype=np.float64)}
+    stack = [root]
+    while stack:
+        parent = stack.pop()
+        for child in tree.neighbors(parent):
+            if child in centers:
+                continue
+            centers[child] = centers[parent] + displacements[(parent, child)]
+            stack.append(child)
+    scales = {
+        star_index: 1.0
+        for star_index in range(len(predictions_dict["indexes"]))
+    }
+    return centers, scales
+
+
 def initialize_mst_structures(
     predictions_dict: dict,
     global_rotations: dict[int, np.ndarray],
@@ -90,6 +132,13 @@ def initialize_mst_structures(
             * ``global_centers`` keyed by image index, each ``(3,)`` float64.
             * ``global_scales`` keyed by star index.
     """
+    if "pose_constraints" in predictions_dict:
+        predictions_dict["median_tri_angle"] = {
+            index: np.full(len(members) - 1, 90.0)
+            for index, members in enumerate(predictions_dict["indexes"])
+        }
+        return _initialize_group_cover(predictions_dict, global_rotations)
+
     N = max(global_rotations.keys()) + 1
     indexes = range(len(predictions_dict["indexes"]))
 

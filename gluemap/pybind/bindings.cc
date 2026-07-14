@@ -108,6 +108,12 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("target_center"), py::arg("target_cam_from_world_rotation"),
         py::arg("center_sigma"), py::arg("rotation_sigma"));
 
+  m.def("GravityDirectionError",
+        &GravityDirectionError::Create<const Eigen::Vector3d &,
+                                       const Eigen::Vector3d &, const double>,
+        py::arg("world_gravity"), py::arg("camera_gravity"),
+        py::arg("angular_sigma"));
+
   m.def("ReprojErrorCost",
         &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor,
                                           const Eigen::Vector2d &>,

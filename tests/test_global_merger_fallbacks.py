@@ -1,12 +1,57 @@
 """Regression tests for incomplete global camera initialization."""
 
+from types import SimpleNamespace
+
 import numpy as np
+import torch
 from scipy.spatial.transform import Rotation
 
 from gluemap.controllers.global_merger import (
+    GlobalGluer,
+    _estimate_trajectory_gravity,
+    _fill_missing_centers_from_priors,
     _fill_missing_centers_temporally,
     _fill_missing_rotations_temporally,
 )
+
+
+def test_rotation_filter_never_drops_adjacent_trajectory_odometry():
+    quarter_turn = torch.from_numpy(
+        Rotation.from_euler("z", 90, degrees=True).as_matrix()
+    ).double()
+    pose = torch.cat([quarter_turn, torch.zeros(3, 1)], dim=1)
+    predictions = {
+        "pose_constraints": [
+            {
+                "first": 0,
+                "second": 1,
+                "pose": pose,
+                "score": 1.0,
+                "kind": "trajectory_odometry",
+                "active": True,
+            },
+            {
+                "first": 0,
+                "second": 1,
+                "pose": pose,
+                "score": 1.0,
+                "kind": "verified_loop",
+                "active": True,
+            },
+        ]
+    }
+    gluer = GlobalGluer(
+        SimpleNamespace(
+            valid_pose_threshold=0.05,
+            is_sequential=False,
+            use_ceres_rotation_averaging=False,
+        )
+    )
+
+    gluer._filter_invalid_edges(predictions, {0: np.eye(3), 1: np.eye(3)})
+
+    assert predictions["pose_constraints"][0]["active"]
+    assert not predictions["pose_constraints"][1]["active"]
 
 
 def test_missing_centers_are_linearly_interpolated():
@@ -35,9 +80,7 @@ def test_missing_rotations_are_slerped():
 
 def test_edge_runs_copy_nearest_estimate():
     centers = {2: np.array([2.0, 4.0, 6.0])}
-    rotations = {
-        2: Rotation.from_euler("x", 15, degrees=True).as_matrix()
-    }
+    rotations = {2: Rotation.from_euler("x", 15, degrees=True).as_matrix()}
 
     filled_centers = _fill_missing_centers_temporally(centers, 4)
     filled_rotations = _fill_missing_rotations_temporally(rotations, 4)
@@ -45,3 +88,36 @@ def test_edge_runs_copy_nearest_estimate():
     for idx in (0, 1, 3):
         np.testing.assert_allclose(filled_centers[idx], centers[2])
         np.testing.assert_allclose(filled_rotations[idx], rotations[2])
+
+
+def test_missing_centers_follow_curved_trajectory_prior():
+    priors = []
+    for center in ([0, 0, 0], [1, 1, 0], [2, 2, 0], [3, 1, 0], [4, 0, 0]):
+        pose = np.eye(4)
+        pose[:3, 3] = center
+        priors.append(pose)
+    centers = {0: np.array([0.0, 0.0, 0.0]), 4: np.array([4.0, 0.0, 0.0])}
+    rotations = {index: np.eye(3) for index in range(5)}
+
+    filled = _fill_missing_centers_from_priors(
+        centers, rotations, priors, num_images=5
+    )
+
+    np.testing.assert_allclose(filled[2], [2.0, 2.0, 0.0])
+    assert filled[1][1] > 0.5
+    assert filled[3][1] > 0.5
+
+
+def test_gravity_is_estimated_without_changing_rotations():
+    priors = [np.eye(4), np.eye(4)]
+    rotations = {
+        0: Rotation.from_euler("x", -5, degrees=True).as_matrix(),
+        1: Rotation.from_euler("x", 5, degrees=True).as_matrix(),
+    }
+    originals = {key: value.copy() for key, value in rotations.items()}
+
+    gravity_world = _estimate_trajectory_gravity(rotations, priors)
+
+    np.testing.assert_allclose(gravity_world, [0.0, 1.0, 0.0], atol=1e-7)
+    for image_id, rotation in rotations.items():
+        np.testing.assert_array_equal(rotation, originals[image_id])

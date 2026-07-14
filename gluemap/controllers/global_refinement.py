@@ -191,6 +191,7 @@ def run_refinement_pipeline(
     num_refinement_iterations: int = 2,
     track_mode: str = "SPV",
     pose_priors: dict | None = None,
+    gravity_priors: dict | None = None,
 ) -> pycolmap.Reconstruction:
     """
     Run the refinement pipeline.
@@ -213,6 +214,7 @@ def run_refinement_pipeline(
         track_mode: Combination of S(IFT), P(rior), V(irtual) tracks to use.
             Valid modes: "SPV", "SP", "SV", "PV", "S", "P".
         pose_priors: Optional robust absolute camera priors keyed by image name.
+        gravity_priors: Optional gravity-only constraints keyed by image name.
 
     Returns:
         pycolmap.Reconstruction: The bundle-adjusted reconstruction
@@ -375,6 +377,7 @@ def run_refinement_pipeline(
         fix_rotations_first_pass=False,
         fix_intrinsics=getattr(args, "fix_intrinsics", False),
         pose_priors=pose_priors,
+        gravity_priors=gravity_priors,
     )
 
     # Step 5: Build reconstruction from current data

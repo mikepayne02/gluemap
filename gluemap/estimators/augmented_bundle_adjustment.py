@@ -238,6 +238,33 @@ def _add_camera_pose_prior_residuals(
     )
 
 
+def _add_gravity_direction_residuals(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    gravity_priors: dict[str, dict[str, np.ndarray]] | None,
+) -> None:
+    """Add per-camera gravity constraints without position or yaw priors."""
+    if not gravity_priors:
+        return
+    constraints = 0
+    for image_id, image in reconstruction.images.items():
+        prior = gravity_priors.get(image.name)
+        if prior is None:
+            continue
+        cost = pygluemap.GravityDirectionError(
+            np.asarray(prior["world_gravity"], dtype=np.float64),
+            np.asarray(prior["camera_gravity"], dtype=np.float64),
+            float(prior["angular_sigma"]),
+        )
+        problem.add_residual_block(
+            cost,
+            None,
+            [reconstruction.frames[image_id].rig_from_world.params],
+        )
+        constraints += 1
+    logger.info("Added %d gravity-only camera constraints", constraints)
+
+
 def _configure_virtual_only_problem(
     problem: pyceres.Problem,
     reconstruction: pycolmap.Reconstruction,
@@ -304,6 +331,48 @@ def _configure_virtual_only_problem(
     )
 
 
+def _configure_parameter_blocks_added_by_virtual_tracks(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    pose_blocks_present_before_virtual: set[int],
+    camera_blocks_present_before_virtual: set[int],
+    fix_intrinsics: bool,
+) -> None:
+    """Configure blocks introduced after PyCOLMAP built the real-track BA.
+
+    PyCOLMAP only installs pose manifolds and intrinsic constraints for
+    parameter blocks reached by real observations. A camera with no real
+    tracks can be introduced later by a virtual reprojection residual; that
+    new raw 7-vector must receive the quaternion pose manifold, and its
+    calibration must still be frozen when ``fix_intrinsics`` is requested.
+    """
+    num_pose_manifolds = 0
+    for image_id in sorted(reconstruction.images):
+        if image_id in pose_blocks_present_before_virtual:
+            continue
+        pose = reconstruction.frames[image_id].rig_from_world.params
+        if problem.has_parameter_block(pose):
+            problem.set_manifold(pose, pygluemap.CreatePoseManifold())
+            num_pose_manifolds += 1
+
+    num_fixed_intrinsics = 0
+    if fix_intrinsics:
+        for camera_id, camera in reconstruction.cameras.items():
+            if camera_id in camera_blocks_present_before_virtual:
+                continue
+            if problem.has_parameter_block(camera.params):
+                problem.set_parameter_block_constant(camera.params)
+                num_fixed_intrinsics += 1
+
+    if num_pose_manifolds or num_fixed_intrinsics:
+        logger.info(
+            "Configured virtual-added parameter blocks: %d pose manifolds, "
+            "%d fixed intrinsics",
+            num_pose_manifolds,
+            num_fixed_intrinsics,
+        )
+
+
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -313,6 +382,7 @@ def bundle_adjustment(
     loss_type_virtual: str = "arctan",
     fix_intrinsics: bool = False,
     pose_priors: dict[str, dict[str, np.ndarray]] | None = None,
+    gravity_priors: dict[str, dict[str, np.ndarray]] | None = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -343,6 +413,7 @@ def bundle_adjustment(
             ``"trivial"``, ``"huber"``, ``"arctan"``, ``"cauchy"``.
         fix_intrinsics: Keep every camera calibration parameter block constant.
         pose_priors: Optional robust absolute pose priors keyed by image name.
+        gravity_priors: Optional gravity-only constraints keyed by image name.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -381,6 +452,18 @@ def bundle_adjustment(
     )
     problem = bundle_adjuster.problem
     virtual_only_problem = problem.num_residual_blocks() == 0
+    pose_blocks_present_before_virtual = {
+        image_id
+        for image_id in reconstruction.images
+        if problem.has_parameter_block(
+            reconstruction.frames[image_id].rig_from_world.params
+        )
+    }
+    camera_blocks_present_before_virtual = {
+        camera_id
+        for camera_id, camera in reconstruction.cameras.items()
+        if problem.has_parameter_block(camera.params)
+    }
 
     logger.info(
         f"After pycolmap BA construction: "
@@ -397,11 +480,19 @@ def bundle_adjustment(
         negative_depth_observations=negative_depth_observations,
         loss_function=_pyceres_loss_function(loss_type_virtual),
     )
+    _configure_parameter_blocks_added_by_virtual_tracks(
+        problem,
+        reconstruction,
+        pose_blocks_present_before_virtual,
+        camera_blocks_present_before_virtual,
+        fix_intrinsics,
+    )
     if virtual_only_problem and virtual_reconstruction is not None:
         _configure_virtual_only_problem(
             problem, reconstruction, fix_intrinsics=fix_intrinsics
         )
     _add_camera_pose_prior_residuals(problem, reconstruction, pose_priors)
+    _add_gravity_direction_residuals(problem, reconstruction, gravity_priors)
 
     logger.info(
         f"After virtual residual add: "

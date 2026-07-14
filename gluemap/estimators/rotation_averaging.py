@@ -8,6 +8,7 @@ import pygluemap
 import torch
 from scipy.spatial.transform import Rotation
 
+from gluemap.estimators.group_pose_constraints import iter_pose_constraints
 from gluemap.math.geometry import (
     quaternion_to_rotation_matrix,
     rotation_matrix_to_quaternion,
@@ -36,28 +37,15 @@ def collect_relative_rotations_ministar(
     """
     poses_rel = {}
     poses_rel_scores = {}
-    for idx_star in range(len(prediction_dict["indexes"])):
-        scores = prediction_dict["pose_scores"][idx_star][0]
-        idx1 = prediction_dict["indexes"][idx_star][0]
-        valid_j = torch.where(scores > 0.0)[0].tolist()
-        # # for idx in range(1, len(prediction_dict["indexes"][idx_star])):
-        for idx in valid_j:
-            idx2 = prediction_dict["indexes"][idx_star][idx]
-
-            if idx1 == idx2:
-                continue
-
-            score = scores[idx].item()
-            existing_score = poses_rel_scores.get((idx1, idx2))
-            if existing_score is not None and existing_score > score:
-                continue
-
-            poses_rel[(idx1, idx2)] = (
-                prediction_dict["extrinsics"][idx_star][0, idx, :3]
-                .cpu()
-                .to(torch.float64)
-            )
-            poses_rel_scores[(idx1, idx2)] = score
+    for constraint in iter_pose_constraints(prediction_dict):
+        idx1 = constraint["first"]
+        idx2 = constraint["second"]
+        score = constraint["score"]
+        existing_score = poses_rel_scores.get((idx1, idx2))
+        if existing_score is not None and existing_score > score:
+            continue
+        poses_rel[(idx1, idx2)] = constraint["pose"].cpu().to(torch.float64)
+        poses_rel_scores[(idx1, idx2)] = score
 
     return poses_rel, poses_rel_scores
 
@@ -186,33 +174,33 @@ def rotation_averaging(
     prob = pyceres.Problem()
     costs = []
     losses = []
-    for idx_star in range(len(prediction_dict["indexes"])):
-        scores = prediction_dict["pose_scores"][idx_star][0]
-        idx1 = prediction_dict["indexes"][idx_star][0]
-        valid_j = torch.where(scores > 0.0)[0].tolist()
-        for idx in valid_j:
-            idx2 = prediction_dict["indexes"][idx_star][idx]
+    for constraint in iter_pose_constraints(prediction_dict):
+        idx1 = constraint["first"]
+        idx2 = constraint["second"]
+        rotation_rel = rotation_matrix_to_quaternion(constraint["pose"][:3, :3])
+        cost = pygluemap.RotationGeodesicError(rotation_rel)
+        costs.append(cost)
 
-            if idx1 == idx2:
-                continue
-
-            rotation_rel = rotation_matrix_to_quaternion(
-                prediction_dict["extrinsics"][idx_star][0, idx, :3, :3]
-            )
-            cost = pygluemap.RotationGeodesicError(rotation_rel)
-            costs.append(cost)
-
+        if constraint["kind"].startswith("trajectory_"):
+            loss_scaled = None
+        else:
             loss_scaled = pyceres.LossFunction(
-                {"name": "huber", "params": [1e-2], "magnitude": scores[idx]}
+                {
+                    "name": "huber",
+                    "params": [1e-2],
+                    "magnitude": constraint["score"],
+                }
             )
             losses.append(loss_scaled)
-            prob.add_residual_block(
-                cost, loss_scaled, [rotations[idx1], rotations[idx2]]
-            )
+        prob.add_residual_block(
+            cost, loss_scaled, [rotations[idx1], rotations[idx2]]
+        )
 
     for idx in rotations:
         if prob.has_parameter_block(rotations[idx]):
             prob.set_manifold(rotations[idx], pyceres.QuaternionManifold())
+    if "pose_constraints" in prediction_dict:
+        prob.set_parameter_block_constant(rotations[min(rotations)])
 
     options = pyceres.SolverOptions()
     if len(rotations) < 200:
@@ -282,27 +270,17 @@ def rotation_averaging_pycolmap(
 
     # Build PoseGraph: collect best-scoring edge per (i, j) pair
     best_edges = {}  # (idx1, idx2) -> (score, star_idx, local_idx)
-    for idx_star in range(len(prediction_dict["indexes"])):
-        scores = prediction_dict["pose_scores"][idx_star][0]
-        idx1 = prediction_dict["indexes"][idx_star][0]
-        valid_j = torch.where(scores > 0.0)[0].tolist()
-        for j in valid_j:
-            idx2 = prediction_dict["indexes"][idx_star][j]
-            if idx1 == idx2:
-                continue
-            score = scores[j].item()
-            pair = (min(idx1, idx2), max(idx1, idx2))
-            if pair not in best_edges or score > best_edges[pair][0]:
-                best_edges[pair] = (score, idx_star, j, idx1, idx2)
+    for constraint in iter_pose_constraints(prediction_dict):
+        idx1 = constraint["first"]
+        idx2 = constraint["second"]
+        score = constraint["score"]
+        pair = (min(idx1, idx2), max(idx1, idx2))
+        if pair not in best_edges or score > best_edges[pair][0]:
+            best_edges[pair] = (score, constraint, idx1, idx2)
 
     pose_graph = pycolmap.PoseGraph()
-    for _pair, (score, idx_star, j, idx1, idx2) in best_edges.items():
-        pose_3x4 = (
-            prediction_dict["extrinsics"][idx_star][0, j]
-            .cpu()
-            .numpy()
-            .astype(np.float64)
-        )
+    for _pair, (score, constraint, idx1, idx2) in best_edges.items():
+        pose_3x4 = constraint["pose"].cpu().numpy().astype(np.float64)
         R = pose_3x4[:3, :3]
         t = pose_3x4[:3, 3]
         quat = Rotation.from_matrix(R).as_quat()  # (x, y, z, w)

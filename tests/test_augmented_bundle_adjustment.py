@@ -67,6 +67,26 @@ def test_camera_pose_prior_cost_uses_center_and_rotation_sigmas():
     )
 
 
+def test_gravity_direction_cost_does_not_constrain_yaw_or_translation():
+    angle = np.deg2rad(37.0)
+    quaternion_xyzw = np.array(
+        [0.0, np.sin(angle / 2.0), 0.0, np.cos(angle / 2.0)]
+    )
+    cam_from_world = np.concatenate((quaternion_xyzw, [9.0, -4.0, 2.0]))
+    problem = pyceres.Problem()
+    problem.add_residual_block(
+        pygluemap.GravityDirectionError(
+            np.array([0.0, 1.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.deg2rad(1.0),
+        ),
+        None,
+        [cam_from_world],
+    )
+
+    np.testing.assert_allclose(problem.evaluate_residuals(), 0.0, atol=1e-12)
+
+
 def split_reconstruction(source, point_ids_to_keep):
     """Deep-copy *source* and keep only the selected 3D points.
 
@@ -413,6 +433,64 @@ class TestBundleAdjustmentEndToEnd:
             )
         self._assert_same_cameras_and_poses(
             virtual_reconstruction, reconstruction
+        )
+
+    def test_virtual_only_camera_in_mixed_ba_keeps_pose_manifold_and_intrinsics(
+        self,
+    ):
+        source = create_synthetic_reconstruction(
+            num_frames=6, num_points3D=80, seed=29
+        )
+        reconstruction = copy.deepcopy(source)
+        virtual_reconstruction = copy.deepcopy(source)
+        image_id = max(reconstruction.images)
+
+        observed_point_indices = [
+            point2d_idx
+            for point2d_idx, point2d in enumerate(
+                reconstruction.images[image_id].points2D
+            )
+            if point2d.has_point3D()
+        ]
+        for point2d_idx in reversed(observed_point_indices):
+            reconstruction.delete_observation(image_id, point2d_idx)
+
+        pose = reconstruction.images[image_id].cam_from_world()
+        perturbed_pose = pycolmap.Rigid3d(
+            np.hstack(
+                [
+                    np.asarray(pose.rotation.matrix()),
+                    (np.asarray(pose.translation) + [0.08, -0.04, 0.03])[
+                        :, None
+                    ],
+                ]
+            )
+        )
+        reconstruction.images[image_id].frame.set_cam_from_world(
+            reconstruction.images[image_id].camera_id, perturbed_pose
+        )
+        camera_id = reconstruction.images[image_id].camera_id
+        expected_intrinsics = reconstruction.cameras[camera_id].params.copy()
+
+        reconstruction, _, summary = bundle_adjustment(
+            reconstruction,
+            virtual_reconstruction,
+            negative_depth_observations={},
+            max_num_iterations=50,
+            fix_intrinsics=True,
+        )
+
+        assert np.isfinite(summary.final_cost)
+        np.testing.assert_allclose(
+            np.linalg.norm(
+                reconstruction.frames[image_id].rig_from_world.params[:4]
+            ),
+            1.0,
+            atol=1e-10,
+        )
+        np.testing.assert_array_equal(
+            reconstruction.cameras[camera_id].params,
+            expected_intrinsics,
         )
 
     def test_ba_recovers_from_noise(self):

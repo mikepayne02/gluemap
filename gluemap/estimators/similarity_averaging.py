@@ -5,6 +5,8 @@ import pyceres
 import pygluemap
 import torch
 
+from gluemap.estimators.group_pose_constraints import iter_pose_constraints
+
 logger = logging.getLogger(__name__)
 # Minimum angle (in degrees) for a triangle to be considered valid for
 # scale estimation
@@ -100,6 +102,54 @@ def _add_star_edge_error(
         was added.
     """
     center = -1
+    if "pose_constraints" in predictions_dict:
+        trajectory_scale = np.ones((1,), dtype=np.float64)
+        predictions_dict["trajectory_scale"] = trajectory_scale
+        for constraint in iter_pose_constraints(predictions_dict):
+            if constraint["kind"] == "trajectory_rotation_bridge":
+                continue
+            star_index = constraint["star_index"]
+            first = constraint["first"]
+            second = constraint["second"]
+            relative_pose = constraint["pose"].cpu().double()
+            observation = (
+                -global_rotations[second].T @ relative_pose[:3, 3:].numpy()
+            )
+            if constraint["kind"] == "trajectory_odometry":
+                loss = None
+            else:
+                loss = pyceres.LossFunction(
+                    {
+                        "name": "huber",
+                        "params": [1e-2],
+                        "magnitude": constraint["score"],
+                    }
+                )
+            cost = pygluemap.PairwiseDirectionError(observation)
+            scale = (
+                trajectory_scale
+                if star_index is None
+                else global_scales[star_index]
+            )
+            prob.add_residual_block(
+                cost,
+                loss,
+                [
+                    global_centers[first],
+                    global_centers[second],
+                    scale,
+                ],
+            )
+            costs.append(cost)
+            if loss is not None:
+                losses.append(loss)
+            if center < 0:
+                prob.set_parameter_block_constant(global_centers[first])
+                center = first
+        if prob.has_parameter_block(trajectory_scale):
+            prob.set_parameter_block_constant(trajectory_scale)
+        return center
+
     for idx_star in range(num_ministar):
         scores = predictions_dict["pose_scores"][idx_star][0]
         idx1 = predictions_dict["indexes"][idx_star][0]
@@ -301,6 +351,9 @@ def similarity_averaging(
     pyceres.solve(options, prob, summary)
 
     logger.info(summary.BriefReport())
+    predictions_dict["solved_group_scales"] = [
+        float(scale[0]) for scale in global_scales
+    ]
 
     _update_points3d(
         prob,

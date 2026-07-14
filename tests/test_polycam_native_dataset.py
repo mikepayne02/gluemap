@@ -123,6 +123,7 @@ def test_native_dataset_accepts_sparse_overlapping_group_cover(tmp_path: Path):
                         "name": "left",
                         "anchor_frame": 1,
                         "frame_indices": [0, 1, 2],
+                        "pose_conditioned_frames": [1, 2],
                     },
                     {
                         "name": "right",
@@ -149,3 +150,6 @@ def test_native_dataset_accepts_sparse_overlapping_group_cover(tmp_path: Path):
     assert dataset.stars[0].tolist() == [1, 0, 2]
     assert dataset.stars[1].tolist() == [3, 2, 4]
     assert dataset.group_coverage.tolist() == [1, 1, 2, 1, 1]
+    assert dataset.group_pose_conditioned_members[0] == {1, 2}
+    assert dataset.group_pose_conditioned_members[1] == set()
+    assert dataset.refinement_edges == [(0, 1), (1, 2), (2, 3), (3, 4)]

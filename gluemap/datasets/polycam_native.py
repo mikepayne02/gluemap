@@ -80,6 +80,7 @@ class PolycamNativeStarDataset(BaseStarDataset):
         valid_edges = []
         edge_scores = {}
         sequential_edges = []
+        trusted_loop_edges = []
         with frontend_edges.open(newline="", encoding="utf-8") as stream:
             for row in csv.DictReader(stream):
                 manifest_first, manifest_second = (
@@ -100,10 +101,20 @@ class PolycamNativeStarDataset(BaseStarDataset):
                 )
                 if row["acceptance_reason"] == "temporal":
                     sequential_edges.append(edge)
+                visual_inliers = int(row.get("visual_inliers") or 0)
+                visual_ratio = float(row.get("visual_inlier_ratio") or 0.0)
+                if row["acceptance_reason"] == "manually_verified" or (
+                    visual_inliers >= 15 and visual_ratio >= 0.30
+                ):
+                    trusted_loop_edges.append(edge)
 
         self.valid_edges = np.asarray(sorted(set(valid_edges)), dtype=np.int64)
         self.edge_scores = edge_scores
         self.sequential_edges = sorted(set(sequential_edges))
+        self.trusted_loop_edges = set(trusted_loop_edges)
+        self.refinement_edges = sorted(
+            set(self.sequential_edges) | self.trusted_loop_edges
+        )
         self.N = len(self.native_to_manifest)
         self.images_list = [
             original_mapping[index] for index in self.native_to_manifest
@@ -131,6 +142,14 @@ class PolycamNativeStarDataset(BaseStarDataset):
                     np.asarray(frame["corrected_c2w_opencv"], dtype=np.float64)
                 )
             )
+        reset_after = set(
+            map(int, self.manifest.get("reset_after_sequence_indices", []))
+        )
+        self.trajectory_break_edges = {
+            (native_index, native_index + 1)
+            for native_index in range(self.N - 1)
+            if self.native_to_manifest[native_index] in reset_after
+        }
         self.query_points = [None] * len(self.valid_edges)
         self.max_neighbors = getattr(args, "max_neighbors", 25)
         self.__post_init__()
@@ -146,6 +165,7 @@ class PolycamNativeStarDataset(BaseStarDataset):
         data = json.loads(group_config.read_text(encoding="utf-8"))
         stars: list[np.ndarray] = []
         names: list[str] = []
+        pose_conditioned_members: list[set[int]] = []
         for group_index, group in enumerate(data["groups"]):
             manifest_members = list(group.get("frame_indices", []))
             for start, end in group.get("frame_ranges_inclusive", []):
@@ -172,6 +192,20 @@ class PolycamNativeStarDataset(BaseStarDataset):
             ]
             stars.append(np.asarray(native_members, dtype=np.int64))
             names.append(group.get("name", f"group_{group_index:04d}"))
+            conditioned_manifest = set(
+                map(int, group.get("pose_conditioned_frames", []))
+            )
+            conditioned_native = {
+                manifest_to_native[index]
+                for index in conditioned_manifest
+                if index in manifest_to_native
+            }
+            if conditioned_native and anchor_native not in conditioned_native:
+                raise ValueError(
+                    f"Group {names[-1]} pose-conditions views without its "
+                    "anchor frame"
+                )
+            pose_conditioned_members.append(conditioned_native)
 
         if not stars:
             raise ValueError(f"No usable groups in {group_config}")
@@ -190,6 +224,7 @@ class PolycamNativeStarDataset(BaseStarDataset):
 
         self.stars = stars
         self.group_names = names
+        self.group_pose_conditioned_members = pose_conditioned_members
         self.image_index_to_star_index = {
             int(star[0]): index for index, star in enumerate(stars)
         }
@@ -257,5 +292,20 @@ class PolycamNativeStarDataset(BaseStarDataset):
 
         batch["metric_depths"] = torch.stack(depths)
         batch["metric_intrinsics"] = torch.stack(intrinsics)
+        if hasattr(self, "group_pose_conditioned_members"):
+            conditioned = self.group_pose_conditioned_members[index]
+            if conditioned:
+                batch["metric_poses_c2w"] = torch.from_numpy(
+                    np.stack(
+                        [
+                            self.pose_priors_c2w[int(member)]
+                            for member in batch["indexes"]
+                        ]
+                    )
+                ).float()
+                batch["metric_pose_mask"] = torch.as_tensor(
+                    [int(member) in conditioned for member in batch["indexes"]],
+                    dtype=torch.bool,
+                )
         batch["manifest_indices"] = np.asarray(manifest_indices, dtype=np.int64)
         return batch

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation, Slerp
 
+from gluemap.estimators.group_pose_constraints import iter_pose_constraints
 from gluemap.estimators.intrinsics_averaging import intrinsics_averaging
 from gluemap.estimators.rotation_averaging import (
     rotation_averaging,
@@ -91,15 +92,153 @@ def _fill_missing_centers_temporally(
             denominator = float(upper - lower)
             for idx in run:
                 alpha = (idx - lower) / denominator
-                result[idx] = (
-                    (1.0 - alpha) * result[lower] + alpha * result[upper]
-                )
+                result[idx] = (1.0 - alpha) * result[lower] + alpha * result[
+                    upper
+                ]
         else:
             reference = lower if lower is not None else upper
             assert reference is not None
             for idx in run:
                 result[idx] = result[reference].copy()
     return result
+
+
+def _rotation_alignment_from_priors(
+    rotations: dict[int, np.ndarray], priors_c2w: list[np.ndarray]
+) -> np.ndarray:
+    """Estimate the world rotation mapping ARKit into the solved frame."""
+    alignments = []
+    for image_id, world_to_camera in rotations.items():
+        prior_c2w = np.asarray(priors_c2w[image_id], dtype=np.float64)
+        solved_c2w = np.asarray(world_to_camera, dtype=np.float64).T
+        alignments.append(solved_c2w @ prior_c2w[:3, :3].T)
+    if not alignments:
+        raise RuntimeError(
+            "Cannot align trajectory priors without solved cameras"
+        )
+    return Rotation.from_matrix(np.stack(alignments)).mean().as_matrix()
+
+
+def _fill_missing_rotations_from_priors(
+    rotations: dict[int, np.ndarray],
+    priors_c2w: list[np.ndarray],
+    num_images: int,
+) -> dict[int, np.ndarray]:
+    """Fill unsupported orientations while retaining ARKit trajectory turns."""
+    if len(priors_c2w) != num_images:
+        raise ValueError("Trajectory-prior count does not match image count")
+    result = {idx: np.asarray(value).copy() for idx, value in rotations.items()}
+    known = sorted(result)
+    if not known:
+        raise RuntimeError("Rotation averaging did not estimate any camera")
+
+    world_alignment = _rotation_alignment_from_priors(result, priors_c2w)
+    aligned_c2w = [
+        world_alignment @ np.asarray(prior)[:3, :3] for prior in priors_c2w
+    ]
+    endpoint_corrections = {
+        idx: result[idx].T @ aligned_c2w[idx].T for idx in known
+    }
+    missing = sorted(set(range(num_images)) - set(known))
+    for run in _contiguous_runs(missing):
+        lower = max((idx for idx in known if idx < run[0]), default=None)
+        upper = min((idx for idx in known if idx > run[-1]), default=None)
+        if lower is not None and upper is not None:
+            correction = Slerp(
+                [float(lower), float(upper)],
+                Rotation.from_matrix(
+                    np.stack(
+                        [
+                            endpoint_corrections[lower],
+                            endpoint_corrections[upper],
+                        ]
+                    )
+                ),
+            )(np.asarray(run, dtype=float)).as_matrix()
+            for image_id, delta in zip(run, correction, strict=True):
+                result[image_id] = (delta @ aligned_c2w[image_id]).T
+        else:
+            reference = lower if lower is not None else upper
+            assert reference is not None
+            delta = endpoint_corrections[reference]
+            for image_id in run:
+                result[image_id] = (delta @ aligned_c2w[image_id]).T
+    return result
+
+
+def _fill_missing_centers_from_priors(
+    centers: dict[int, np.ndarray],
+    rotations: dict[int, np.ndarray],
+    priors_c2w: list[np.ndarray],
+    num_images: int,
+) -> dict[int, np.ndarray]:
+    """Fill unsupported centers using the curved ARKit path, not a line."""
+    if len(priors_c2w) != num_images:
+        raise ValueError("Trajectory-prior count does not match image count")
+    result = {idx: np.asarray(value).copy() for idx, value in centers.items()}
+    known = sorted(result)
+    if not known:
+        raise RuntimeError("Camera-center initialization estimated no cameras")
+
+    supported_rotations = {idx: rotations[idx] for idx in known}
+    world_alignment = _rotation_alignment_from_priors(
+        supported_rotations, priors_c2w
+    )
+    prior_centers = np.stack(
+        [np.asarray(prior, dtype=np.float64)[:3, 3] for prior in priors_c2w]
+    )
+    aligned = (world_alignment @ prior_centers.T).T
+    source = aligned[known]
+    target = np.stack([result[idx] for idx in known])
+    source_centered = source - source.mean(axis=0)
+    target_centered = target - target.mean(axis=0)
+    denominator = float(np.sum(source_centered**2))
+    scale = (
+        float(np.sum(source_centered * target_centered)) / denominator
+        if denominator > 1e-12
+        else 1.0
+    )
+    if not np.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    translation = np.median(target - scale * source, axis=0)
+    aligned = scale * aligned + translation
+    endpoint_offsets = {idx: result[idx] - aligned[idx] for idx in known}
+
+    missing = sorted(set(range(num_images)) - set(known))
+    for run in _contiguous_runs(missing):
+        lower = max((idx for idx in known if idx < run[0]), default=None)
+        upper = min((idx for idx in known if idx > run[-1]), default=None)
+        if lower is not None and upper is not None:
+            denominator = float(upper - lower)
+            for image_id in run:
+                alpha = (image_id - lower) / denominator
+                offset = (1.0 - alpha) * endpoint_offsets[lower] + alpha * (
+                    endpoint_offsets[upper]
+                )
+                result[image_id] = aligned[image_id] + offset
+        else:
+            reference = lower if lower is not None else upper
+            assert reference is not None
+            for image_id in run:
+                result[image_id] = (
+                    aligned[image_id] + endpoint_offsets[reference]
+                )
+    return result
+
+
+def _estimate_trajectory_gravity(
+    rotations: dict[int, np.ndarray], priors_c2w: list[np.ndarray]
+) -> np.ndarray:
+    """Estimate gravity in the solved world without changing camera poses."""
+    arkit_world_gravity = np.array([0.0, 1.0, 0.0])
+    world_estimates = []
+    for image_id, world_to_camera in rotations.items():
+        prior_rotation = np.asarray(priors_c2w[image_id])[:3, :3]
+        camera_gravity = prior_rotation.T @ arkit_world_gravity
+        world_estimates.append(np.asarray(world_to_camera).T @ camera_gravity)
+    gravity_world = np.sum(world_estimates, axis=0)
+    gravity_world /= np.linalg.norm(gravity_world)
+    return gravity_world
 
 
 class GlobalGluer:
@@ -114,7 +253,11 @@ class GlobalGluer:
     entries (prune invisible neighbors).
     """
 
-    def __init__(self, args: argparse.Namespace):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        trajectory_priors_c2w: list[np.ndarray] | None = None,
+    ):
         self.max_rot_error = 5  # degrees
 
         self.valid_threshold_pose = (
@@ -131,6 +274,8 @@ class GlobalGluer:
         self.use_ceres_rotation_averaging = getattr(
             args, "use_ceres_rotation_averaging", False
         )
+        self.trajectory_priors_c2w = trajectory_priors_c2w
+        self.gravity_world = None
 
     def main(
         self,
@@ -189,6 +334,13 @@ class GlobalGluer:
         Modifies ``predictions_dict`` in place (populates ``scores``, zeros
         out ``pose_scores`` for inconsistent edges, prunes invisible pairs).
         """
+        if "pose_constraints" in predictions_dict:
+            valid_edges = {
+                (constraint["first"], constraint["second"])
+                for constraint in iter_pose_constraints(predictions_dict)
+            }
+            return predictions_dict, valid_edges
+
         predictions_dict["scores"] = {}
         for idx in range(len(predictions_dict["indexes"])):
             predictions_dict["scores"][idx] = torch.where(
@@ -206,7 +358,8 @@ class GlobalGluer:
         self._connect_missing(valid_edges, predictions_dict)
 
         # Prune invisible pairs
-        self._prune_invisible_pairs(predictions_dict)
+        if "pose_constraints" not in predictions_dict:
+            self._prune_invisible_pairs(predictions_dict)
 
         return predictions_dict, valid_edges
 
@@ -319,45 +472,34 @@ class GlobalGluer:
         """
         N = self.N
 
-        # Establish tree with the valid edges
-        G = nx.Graph()
-        G.add_edges_from(list(valid_edges))
-
-        # Find the connected components
-        components = list(nx.connected_components(G))
-        if (len(components) == 1) and (len(components[0]) == N):
+        graph = nx.Graph()
+        graph.add_edges_from(valid_edges)
+        components = list(nx.connected_components(graph))
+        if len(components) == 1 and len(components[0]) == N:
             logger.info(
-                f"Edge connectivity of the graph: {nx.edge_connectivity(G)}"
+                "Edge connectivity of the graph: %d",
+                nx.edge_connectivity(graph),
             )
             return
 
-        components = [list(x) for x in components]
-
-        image_id_to_cluster_id = {}
-        for i, component in enumerate(components):
+        image_to_component = {}
+        for component_id, component in enumerate(components):
             for image_id in component:
-                image_id_to_cluster_id[image_id] = i
+                image_to_component[image_id] = component_id
+        next_component = len(components)
+        for image_id in range(N):
+            if image_id not in image_to_component:
+                image_to_component[image_id] = next_component
+                next_component += 1
 
-        curr_component_num = len(components)
-        for i in range(N):
-            if i not in image_id_to_cluster_id:
-                image_id_to_cluster_id[i] = curr_component_num
-                curr_component_num += 1
-
-        # For edges across the components, we just set all scores to be 1e-2
-        for idx in range(len(predictions_dict["indexes"])):
-            idx1 = predictions_dict["indexes"][idx][0]
-            for i, idx_inner in enumerate(predictions_dict["indexes"][idx]):
-                if i == 0:
-                    continue
-
-                if (
-                    image_id_to_cluster_id[idx1]
-                    != image_id_to_cluster_id[idx_inner]
-                ):
-                    predictions_dict["pose_scores"][idx][0, i] += 1e-2
-                    logger.debug(f"{idx1} {idx_inner} cross component")
-                    valid_edges.add((idx1, idx_inner))
+        for star_index, image_ids in enumerate(predictions_dict["indexes"]):
+            anchor = image_ids[0]
+            for position, member in enumerate(image_ids[1:], start=1):
+                if image_to_component[anchor] != image_to_component[member]:
+                    predictions_dict["pose_scores"][star_index][
+                        0, position
+                    ] += 1e-2
+                    valid_edges.add((anchor, member))
 
     def _global_structure_estimation(
         self,
@@ -375,10 +517,16 @@ class GlobalGluer:
         """
         # Double sequential edge weights (neighboring frames with index
         # diff <= 10)
-        if self.boost_sequential:
+        if self.boost_sequential and "pose_constraints" not in predictions_dict:
             self._boost_sequential_edges(predictions_dict, boost_factor=2.0)
 
-        if self.use_ceres_rotation_averaging:
+        if "pose_constraints" in predictions_dict:
+            global_rotations = rotation_averaging(predictions_dict)
+            self._filter_invalid_edges(predictions_dict, global_rotations)
+            global_rotations = rotation_averaging(
+                predictions_dict, global_rotations
+            )
+        elif self.use_ceres_rotation_averaging:
             # Original two-pass: RA -> filter -> RA -> filter
             global_rotations = rotation_averaging(predictions_dict)
             self._filter_invalid_edges(predictions_dict, global_rotations)
@@ -392,17 +540,33 @@ class GlobalGluer:
             )
             self._filter_invalid_edges(predictions_dict, global_rotations)
 
-        self._prune_invisible_pairs(predictions_dict)
+        if "pose_constraints" not in predictions_dict:
+            self._prune_invisible_pairs(predictions_dict)
 
         missing_rotation_count = self.N - len(global_rotations)
         if missing_rotation_count:
-            logger.warning(
-                "Temporally interpolating %d cameras omitted by rotation "
-                "averaging",
-                missing_rotation_count,
-            )
-            global_rotations = _fill_missing_rotations_temporally(
-                global_rotations, self.N
+            if self.trajectory_priors_c2w is None:
+                logger.warning(
+                    "Temporally interpolating %d cameras omitted by rotation "
+                    "averaging",
+                    missing_rotation_count,
+                )
+                global_rotations = _fill_missing_rotations_temporally(
+                    global_rotations, self.N
+                )
+            else:
+                logger.info(
+                    "Initializing %d unsupported camera rotations from the "
+                    "curved trajectory prior",
+                    missing_rotation_count,
+                )
+                global_rotations = _fill_missing_rotations_from_priors(
+                    global_rotations, self.trajectory_priors_c2w, self.N
+                )
+
+        if self.trajectory_priors_c2w is not None:
+            self.gravity_world = _estimate_trajectory_gravity(
+                global_rotations, self.trajectory_priors_c2w
             )
 
         # Initialize the structures by maximum spanning tree
@@ -412,9 +576,9 @@ class GlobalGluer:
 
         disconnected_ids = sorted(set(range(self.N)) - set(global_centers))
         if disconnected_ids:
-            logger.warning(
-                "Temporally interpolating poses for %d cameras disconnected "
-                "from the center-initialization tree",
+            logger.info(
+                "Initializing poses for %d cameras disconnected from the "
+                "center-initialization tree",
                 len(disconnected_ids),
             )
             connected_rotations = {
@@ -422,12 +586,23 @@ class GlobalGluer:
                 for idx, rotation in global_rotations.items()
                 if idx not in disconnected_ids
             }
-            global_rotations = _fill_missing_rotations_temporally(
-                connected_rotations, self.N
-            )
-            global_centers = _fill_missing_centers_temporally(
-                global_centers, self.N
-            )
+            if self.trajectory_priors_c2w is None:
+                global_rotations = _fill_missing_rotations_temporally(
+                    connected_rotations, self.N
+                )
+                global_centers = _fill_missing_centers_temporally(
+                    global_centers, self.N
+                )
+            else:
+                global_rotations = _fill_missing_rotations_from_priors(
+                    connected_rotations, self.trajectory_priors_c2w, self.N
+                )
+                global_centers = _fill_missing_centers_from_priors(
+                    global_centers,
+                    global_rotations,
+                    self.trajectory_priors_c2w,
+                    self.N,
+                )
 
         global_centers = similarity_averaging(
             predictions_dict,
@@ -445,9 +620,17 @@ class GlobalGluer:
                 for idx, center in global_centers.items()
                 if idx not in disconnected_ids
             }
-            global_centers = _fill_missing_centers_temporally(
-                connected_centers, self.N
-            )
+            if self.trajectory_priors_c2w is None:
+                global_centers = _fill_missing_centers_temporally(
+                    connected_centers, self.N
+                )
+            else:
+                global_centers = _fill_missing_centers_from_priors(
+                    connected_centers,
+                    global_rotations,
+                    self.trajectory_priors_c2w,
+                    self.N,
+                )
 
         # Prune the edges by the global rotations
         self._mark_inconsistent_edges(
@@ -584,6 +767,39 @@ class GlobalGluer:
         in place; returns the list of filtered ``(idx, i, score, error)``
         tuples.
         """
+        if "pose_constraints" in predictions_dict:
+            threshold = np.deg2rad(self.max_rot_error)
+            filtered = []
+            for index, constraint in enumerate(
+                predictions_dict["pose_constraints"]
+            ):
+                if not constraint["active"]:
+                    continue
+                if constraint["kind"] in {
+                    "trajectory_odometry",
+                    "trajectory_rotation_bridge",
+                }:
+                    continue
+                first, second = constraint["first"], constraint["second"]
+                rotation_global = (
+                    global_rotations[second] @ global_rotations[first].T
+                )
+                rotation_local = constraint["pose"][:3, :3].cpu().double()
+                error = self._rotation_errors(
+                    torch.from_numpy(rotation_global).unsqueeze(0),
+                    rotation_local.unsqueeze(0),
+                )[0]
+                if error > threshold:
+                    constraint["active"] = False
+                    filtered.append((index, 0, constraint["score"], error))
+            if filtered:
+                logger.info(
+                    "Filtered %d / %d explicit group constraints by rotation",
+                    len(filtered),
+                    len(predictions_dict["pose_constraints"]),
+                )
+            return filtered
+
         indexes = range(len(predictions_dict["indexes"]))
         thres = np.deg2rad(self.max_rot_error)
         num_filtered = 0

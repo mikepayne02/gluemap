@@ -15,6 +15,9 @@ from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.twoview_inference import run_twoview_inference
 from gluemap.datasets.star import BaseStarDataset
 from gluemap.datasets.twoview import BaseTwoViewDataset
+from gluemap.estimators.group_pose_constraints import (
+    build_group_pose_constraints,
+)
 from gluemap.estimators.rotation_averaging import (
     collect_relative_rotations_ministar,
 )
@@ -31,6 +34,73 @@ from gluemap.utils.colmap import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_predictions_for_global_mapping(predictions_dict: dict) -> dict:
+    """Copy the small mutable subset used by global camera estimation.
+
+    GlobalGluer rejects pose relations by pruning group members and adjusts
+    relative translations during similarity averaging.  Those operations
+    must not alter the full MapAnything groups later used to construct virtual
+    depth tracks.
+    """
+    copied = {}
+    for key, value in predictions_dict.items():
+        if isinstance(value, list):
+            copied[key] = list(value)
+        else:
+            copied[key] = value
+
+    copied["indexes"] = [
+        list(indexes) for indexes in predictions_dict["indexes"]
+    ]
+    for key in ("pose_scores", "extrinsics"):
+        copied[key] = [value.clone() for value in predictions_dict[key]]
+    return copied
+
+
+def _set_full_group_visibility_scores(predictions_dict: dict) -> None:
+    """Restore per-pixel visibility scores for unpruned MapAnything groups."""
+    predictions_dict["scores"] = {
+        index: torch.where(visibility > 0.05, visibility, 0.0)
+        for index, visibility in enumerate(predictions_dict["vis"])
+    }
+
+
+def _apply_group_scales(predictions_dict: dict, scales: list[float]) -> None:
+    """Apply camera-solve group scales without pruning neural observations."""
+    if len(scales) != len(predictions_dict["indexes"]):
+        raise ValueError("Group-scale count does not match prediction groups")
+    for star_index, scale in enumerate(scales):
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError(
+                f"Invalid solved scale for group {star_index}: {scale}"
+            )
+        predictions_dict["points3d_virtual"][star_index] /= scale
+        predictions_dict["extrinsics"][star_index][:, :, :3, 3:] /= scale
+
+
+def _build_gravity_priors(
+    dataset_pair,
+    gravity_world: np.ndarray | None,
+    angular_sigma_deg: float = 0.5,
+) -> dict | None:
+    """Build gravity-only BA constraints from corrected ARKit orientation."""
+    priors_c2w = getattr(dataset_pair, "pose_priors_c2w", None)
+    if gravity_world is None or priors_c2w is None:
+        return None
+    arkit_world_gravity = np.array([0.0, 1.0, 0.0])
+    return {
+        image_name: {
+            "world_gravity": np.asarray(gravity_world, dtype=np.float64),
+            "camera_gravity": np.asarray(prior, dtype=np.float64)[:3, :3].T
+            @ arkit_world_gravity,
+            "angular_sigma": np.deg2rad(angular_sigma_deg),
+        }
+        for image_name, prior in zip(
+            dataset_pair.images_list, priors_c2w, strict=True
+        )
+    }
 
 
 class GluemapPipeline:
@@ -223,7 +293,27 @@ class GluemapPipeline:
             dataset.image_index_to_star_index
         )
 
-        global_gluer = GlobalGluer(args)
+        pose_graph_predictions = _copy_predictions_for_global_mapping(
+            predictions_dict
+        )
+        trusted_loop_edges = set(
+            getattr(dataset_pair, "trusted_loop_edges", set())
+        )
+        if hasattr(dataset, "group_coverage"):
+            pose_graph_predictions["pose_constraints"] = (
+                build_group_pose_constraints(
+                    pose_graph_predictions,
+                    trusted_loop_edges,
+                    list(dataset_pair.pose_priors_c2w),
+                    set(getattr(dataset_pair, "trajectory_break_edges", set())),
+                )
+            )
+        global_gluer = GlobalGluer(
+            args,
+            trajectory_priors_c2w=getattr(
+                dataset_pair, "pose_priors_c2w", None
+            ),
+        )
         global_gluer.sequential_edges = set(
             getattr(dataset_pair, "sequential_edges", [])
         )
@@ -232,14 +322,25 @@ class GluemapPipeline:
             global_centers,
             global_intrinsics,
             valid_edges,
-            predictions_dict,
+            pose_graph_predictions,
         ) = global_gluer.main(
-            predictions_dict,
+            pose_graph_predictions,
             dataset_pair.intrinsics_mapping,
             dataset_pair.camera_model,
             dataset.N,
         )
         timing["global_mapping"] = time.perf_counter() - t0
+        gravity_priors = _build_gravity_priors(
+            dataset_pair, global_gluer.gravity_world
+        )
+        if "solved_group_scales" in pose_graph_predictions:
+            _apply_group_scales(
+                predictions_dict,
+                pose_graph_predictions["solved_group_scales"],
+            )
+        global_gluer._mark_inconsistent_edges(
+            predictions_dict, global_rotations, global_centers
+        )
 
         known_intrinsics = getattr(dataset_pair, "known_intrinsics", None)
         if known_intrinsics is not None:
@@ -274,6 +375,7 @@ class GluemapPipeline:
                 f"Replaced intrinsics with GT from {args.gt_intrinsics_path}"
             )
 
+        _set_full_group_visibility_scores(predictions_dict)
         virtual_track_preparation = VirtualTrackPreparation()
         virtual_track_preparation.main(
             predictions_dict,
@@ -364,6 +466,7 @@ class GluemapPipeline:
             ),
             track_mode=track_mode,
             pose_priors=None,
+            gravity_priors=gravity_priors,
         )
         timing["refinement"] = time.perf_counter() - t0
         timing["refinement_detail"] = refinement_timing

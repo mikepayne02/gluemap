@@ -23,13 +23,20 @@ class MapAnythingLocalInference(LocalInference):
         images = batch["images"].to(self.device).contiguous()
         metric_depths = batch.get("metric_depths")
         metric_intrinsics = batch.get("metric_intrinsics")
+        metric_poses_c2w = batch.get("metric_poses_c2w")
+        metric_pose_mask = batch.get("metric_pose_mask")
         if metric_depths is not None:
             metric_depths = metric_depths.to(self.device).contiguous()
         if metric_intrinsics is not None:
             metric_intrinsics = metric_intrinsics.to(self.device).contiguous()
+        if metric_poses_c2w is not None:
+            metric_poses_c2w = metric_poses_c2w.to(self.device).contiguous()
+            metric_pose_mask = metric_pose_mask.to(self.device).bool()
         processed_views = self._compose_input_views(
             images,
             metric_depths=metric_depths,
+            metric_poses_c2w=metric_poses_c2w,
+            metric_pose_mask=metric_pose_mask,
             global_intrinsics=metric_intrinsics,
         )
 
@@ -45,9 +52,9 @@ class MapAnythingLocalInference(LocalInference):
             confidence_percentile=10,
             ignore_calibration_inputs=False,
             ignore_depth_inputs=False,
-            ignore_pose_inputs=True,
+            ignore_pose_inputs=metric_poses_c2w is None,
             ignore_depth_scale_inputs=False,
-            ignore_pose_scale_inputs=True,
+            ignore_pose_scale_inputs=metric_poses_c2w is None,
         )
 
         return self._retrieve_result(predictions)
@@ -56,6 +63,8 @@ class MapAnythingLocalInference(LocalInference):
     def _compose_input_views(
         images: torch.Tensor,
         metric_depths: torch.Tensor | None = None,
+        metric_poses_c2w: torch.Tensor | None = None,
+        metric_pose_mask: torch.Tensor | None = None,
         global_rotations: torch.Tensor | None = None,
         global_centers: torch.Tensor | None = None,
         global_intrinsics: torch.Tensor | None = None,
@@ -84,10 +93,22 @@ class MapAnythingLocalInference(LocalInference):
 
         if images.ndim == 4:
             images = images.unsqueeze(0)
+        if metric_poses_c2w is not None:
+            if metric_pose_mask is None:
+                raise ValueError(
+                    "Pose inputs require an explicit per-view mask"
+                )
+            if not bool(metric_pose_mask[0, 0]):
+                raise ValueError(
+                    "MapAnything requires the group anchor pose whenever any "
+                    "view is pose-conditioned"
+                )
         input_views = []
         for i in range(images.shape[1]):
             view = {"img": images[0, i].permute(1, 2, 0)}  # (H, W, 3)
-            if global_rotations is not None:
+            if metric_poses_c2w is not None and bool(metric_pose_mask[0, i]):
+                view["camera_poses"] = metric_poses_c2w[0, i]
+            elif global_rotations is not None:
                 camera_pose = np.eye(4, dtype=np.float32)
                 camera_pose[:3, :3] = global_rotations[0, i].T
                 camera_pose[:3, 3] = global_centers[0, i]
