@@ -123,10 +123,16 @@ PYTHONPATH=. python scripts/project_polycam_diagnostics.py \
 
 ### Residual-drift evidence
 
-Pose-proximity proposals plus visual inspection established:
+Pose-proximity proposals plus later image/depth verification established:
 
-- Frames around 2232 and 3088 revisit the same basement lower-landing area and
-  have camera centers within about 0.08 m after rigid reset alignment.
+- The original manual pair 2232/3088 is not a valid visual correspondence:
+  frame 2232 observes the basement stairs while frame 3088 observes the
+  main-floor kitchen. Their cameras may be physically nearby, but the pair
+  cannot be used as image evidence and is excluded from group construction and
+  refinement.
+- Frames 2218-2221 and 3088 revisit the same kitchen/basement-entry area. They
+  provide the visual anchor for a balanced group that also carries the first
+  visit continuously into the basement stairs.
 - Frames 2379-2380 and 3034 unmistakably observe the same basement staircase,
   but their corrected camera centers remain about 1.58-1.60 m apart.
 - The staircase mismatch is internal drift within reset segment 1. A single
@@ -139,3 +145,11 @@ The verified staircase ranges should seed a MapAnything comparison with and
 without pose conditioning. Depth and intrinsics remain enabled in both cases.
 The predicted local geometry becomes a loop measurement for global
 optimization; it must not directly overwrite the corrected ARKit trajectory.
+
+A later whole-checkpoint audit found one additional upper-stair failure at
+frames 968--975. Those images mostly observe a featureless wall, and every
+pose-free group invented large camera jumps. A controlled 64-view comparison
+showed full local pose conditioning was substantially better than pose-free or
+sparse conditioning by measured LiDAR consistency. The accepted recovery is
+bounded to frames 966--978 in configuration; it does not enable pose
+conditioning for the rest of the dataset.

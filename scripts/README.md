@@ -20,23 +20,53 @@ Run these stages in order:
 6. `build_polycam_native_frontend.py` freezes the audited temporal and
    image-verified edge list.
 7. `build_polycam_native_groups.py` creates the overlapping 64-view
-   MapAnything cover, including verified revisit groups.
+   MapAnything cover. Its optional recovery policy first removes explicitly
+   rejected evidence, then adds balanced groups around audited weak
+   transitions without hard-coding Telluride frame ranges in Python.
 8. `run_polycam_native_gluemap.py` performs MapAnything inference, native
    GLUEMAP assembly, and optional global refinement from the saved inference
-   result.
+   result. Use `--inference-only` when newly recovered groups must pass local
+   camera/depth validation before they are allowed into global assembly.
 
 The production contract is:
 
 - MapAnything receives RGB, metric LiDAR depth, and calibrated intrinsics.
+- The current Telluride cover has 136 64-view groups: one verified basement
+  revisit, 128 graph-cover groups, five balanced revisit groups, and two local
+  failure-recovery groups. The base and revisit groups are pose-free. One
+  featureless upper-stair interval uses locally validated full pose
+  conditioning; one RGB/depth mismatch interval suppresses only its bad depth.
+  Group sizes, rejected evidence, recovery candidates, and their bounded
+  preferred intervals live in JSON policy, not reconstruction code.
 - ARKit is used for reset correction and frontend vicinity proposals only.
 - Non-temporal proximity alone is not reconstruction evidence.
-- Global assembly uses overlapping MapAnything group estimates at fixed
-  metric scale.
+- Global assembly preserves every accepted MapAnything group as a rigid local
+  fragment at fixed metric scale. Shared cameras align overlapping fragments;
+  consecutive-pair consensus remains a coverage and disagreement diagnostic.
+  A validated recovery group can contribute extra temporal constraints only
+  inside the interval declared in its configuration.
 - Global rotations use score-weighted Ceres averaging; the unweighted
   PyCOLMAP rotation pass is not the production solver for this group cover.
-- Final refinement uses virtual/neural tracks (`V`) with fixed intrinsics.
-- SIFT, absolute ARKit poses, and per-camera gravity are not optimization
+- Final refinement uses temporal and configuration-verified SIFT plus
+  MapAnything virtual tracks (`SV`) with fixed intrinsics and standard unit
+  pixel residuals.
+- The runner exposes Ceres' linear solver as `--ba-linear-solver`. Keep
+  `auto` for ordinary runs; use `sparse_schur` when a dense overlapping-group
+  graph makes iterative Schur fail to produce a finite step. This changes the
+  numerical factorization only, not the reconstruction objective.
+- `--ba-filter-iterations` controls the existing BA/outlier-filter loop; the
+  default remains three. A production run may cap it at two when the third,
+  stricter pass removes enough support to make the reduced camera system
+  rank-deficient after two already-converged passes.
+- Continuation is based on the fraction of 2D observations removed, not a
+  dimensionally inconsistent comparison between removed observations and 3D
+  point count. A pass below the configured 1% removal threshold terminates
+  refinement cleanly.
+- Absolute ARKit poses and per-camera gravity are not optimization
   constraints.
+- Production preflight fails if any consecutive camera pair lacks a joint
+  MapAnything prediction. Global assembly never raises weak scores merely to
+  force connectivity and never interpolates unsupported cameras.
 
 ## Acceptance and exports
 

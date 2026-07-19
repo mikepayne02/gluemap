@@ -8,7 +8,7 @@ This file records the working native GLUEMAP + MapAnything environment used for 
 - Python: 3.11
 - PyTorch: `2.4.1+cu124`
 - Torchvision: `0.19.1+cu124`
-- GPU used successfully: NVIDIA A40 48 GB
+- GPUs used successfully: NVIDIA A40 48 GB and NVIDIA H100 80 GB
 - Network volume: `/workspace`
 - Repository: `/workspace/telluride/gluemap`
 - Dataset: `/workspace/telluride/data`
@@ -44,9 +44,14 @@ It was created with:
 ```bash
 /workspace/tools/micromamba-bin/micromamba create -y \
   -p /workspace/tools/gluemap-cpp -c conda-forge \
-  ceres-solver=2.2.0 eigen=3.4.0 metis=5.1.0 \
+  'ceres-solver=2.2.0=h417fa77_5' eigen=3.4.0 metis=5.1.0 \
   boost=1.85.0 libstdcxx-ng=15.2.0
 ```
+
+Pin the CPU Ceres build exactly. In July 2026, an unconstrained conda solve
+selected a GPU Ceres build that requires CUDA 12.9, which cannot be linked by
+the pinned CUDA 12.4 RunPod image. The CPU Ceres build is sufficient because
+GLUEMAP's CUDA solver is provided by `pygluemap`, not Ceres itself.
 
 System build/runtime packages:
 
@@ -133,15 +138,40 @@ MapAnything 128-view RGB + metric-depth + intrinsics inference completed on the 
 
 - 64-view pose-free predictions: `/workspace/telluride/results/round2_posefree`
 - Restored rigid baseline: `/workspace/telluride/results/round2_rigid`
-- 128-view MapAnything stair diagnostic: `/workspace/telluride/results/stair_bridge_128`
+- Rejected 128-view MapAnything stair diagnostic:
+  `/workspace/telluride/results/stair_bridge_128`
 - Frontend LightGlue audits: `/workspace/telluride/results/frontend_audit`
+
+The production candidate uses 136 groups: one verified revisit, 128 graph
+groups, five balanced 64-view revisit groups, and two bounded 64-view local
+recoveries. The earlier 128-view transition windows folded internally and are
+diagnostics only. All groups are pose-free except the measured upper-stair
+failure around frame 970. Frames 3081--3083 have depth disabled only inside
+their recovery group because their RGB and depth streams disagree.
+
+Rebuild that cover deterministically from the audited inputs with:
+
+```bash
+cd /workspace/telluride/gluemap
+python scripts/build_polycam_native_groups.py \
+  /workspace/telluride/final_reconstruction/config/manifest_corrected.json \
+  /workspace/telluride/final_reconstruction/config/index_mapping.json \
+  /workspace/telluride/final_reconstruction/config/native_frontend_edges.csv \
+  /workspace/telluride/reconstruction_inputs/fullhouse_groups_final.json \
+  --group-size 64 \
+  --minimum-memberships 2 \
+  --recovery-policy configs/telluride_group_recovery.json
+```
 
 The rejected per-camera translation optimizer and its point clouds were removed. They must not be used as initialization for native GLUEMAP.
 
 ## Telluride-native reconstruction conventions
 
 - Polycam ARKit poses select nearby candidate frames and remain an external
-  metric/global diagnostic; they are not currently fed into MapAnything.
+  metric/global diagnostic. They are not supplied to ordinary groups; one
+  configuration-scoped featureless stair recovery uses relative local pose
+  conditioning because a controlled comparison showed it was materially more
+  coherent than pose-free inference.
 - The audited frontend graph combines temporal continuity, reciprocal LiDAR
   overlap, and LightGlue verification. Its frozen edge list is
   `/workspace/telluride/inputs/native_frontend_edges.csv`.
@@ -155,8 +185,29 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   must not be hidden as a per-frame focal-length change.
 - `use_dummy_tracks=True` avoids loading VGGSfM. Those repeated query points
   are interface placeholders, not real cross-view tracks. Production uses
-  `track_mode=V`, so GLUEMAP skips SIFT construction and track snapping and
-  refines only MapAnything depth-derived virtual tracks.
+  `track_mode=SV`: SIFT tracks are built only from temporal and explicitly
+  verified revisit pairs, then refined together with MapAnything
+  depth-derived virtual tracks.
+- The 136-group full-house `SV` graph is dense enough that Ceres' automatic
+  iterative-Schur choice can fail before accepting any update. Run that graph
+  with `--ba-linear-solver sparse_schur`; the direct solver minimizes the same
+  residuals and leaves all track weights and reconstruction constraints
+  unchanged.
+- On this graph, the first two direct-Schur BA/filter passes converge while
+  the third pass can become rank-deficient after stricter observation pruning.
+  Use `--ba-filter-iterations 2`; this retains both converged solves and avoids
+  optimizing an underconstrained third system.
+- The iterative-BA continuation ratio must divide removed observations by the
+  pre-filter observation count. The former observation-versus-point comparison
+  falsely requested another solve after only about 0.5% of observations were
+  removed and produced a rank-deficient reduced system.
+- The final S/V camera-refinement run is retained as a rejected diagnostic:
+  despite converging in pixel space, it visibly degraded measured-depth
+  coherence and changed global diagnostic scale. The accepted deliverable
+  therefore keeps the validated coarse cameras fixed and triangulates the
+  configured SIFT tracks against them. See
+  `/home/michael/telluride/final_reconstruction_v2/README.md` before selecting
+  a COLMAP model for Nerfstudio.
 - Virtual-only BA must explicitly install quaternion manifolds, fix one camera
   pose, fix one translation component on a well-separated second camera, and
   keep calibrated intrinsics constant. PyCOLMAP cannot establish that gauge
@@ -167,9 +218,11 @@ The rejected per-camera translation optimizer and its point clouds were removed.
   ARKit residual. Do not pass `--pose-prior-position-sigma-m` in Telluride
   production runs; differences after diagnostic Sim3 alignment must be called
   ARKit disagreement, not camera error.
-- Production global assembly requires every camera to retain MapAnything group
-  support. ARKit and temporal interpolation fallbacks are disabled; an
-  unsupported camera fails the run instead of receiving an invented pose.
+- Production global assembly preserves each accepted MapAnything group as a
+  rigid anchor-to-member fragment and aligns overlapping fragments through
+  shared cameras. Every camera must retain group support. ARKit and temporal
+  interpolation fallbacks are disabled; an unsupported camera fails instead
+  of receiving an invented pose.
 - Metric-depth-conditioned groups all use scale 1.0 during similarity
   averaging. Do not freeze noisy spanning-tree scale ratios as per-group
   scales.

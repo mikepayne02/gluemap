@@ -181,7 +181,10 @@ def rotation_averaging(
         cost = pygluemap.RotationGeodesicError(rotation_rel)
         costs.append(cost)
 
-        if constraint["kind"].startswith("trajectory_"):
+        if constraint["kind"] in {
+            "mapanything_temporal",
+            "mapanything_recovery_temporal",
+        }:
             loss_scaled = None
         else:
             loss_scaled = pyceres.LossFunction(
@@ -199,8 +202,9 @@ def rotation_averaging(
     for idx in rotations:
         if prob.has_parameter_block(rotations[idx]):
             prob.set_manifold(rotations[idx], pyceres.QuaternionManifold())
-    if "pose_constraints" in prediction_dict:
-        prob.set_parameter_block_constant(rotations[min(rotations)])
+    # Relative rotations have one free global-rotation gauge. Fixing a single
+    # camera is required for both explicit constraints and legacy star edges.
+    prob.set_parameter_block_constant(rotations[min(rotations)])
 
     options = pyceres.SolverOptions()
     if len(rotations) < 200:

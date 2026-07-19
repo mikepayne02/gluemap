@@ -134,7 +134,7 @@ def main() -> None:
     bridge_results = []
     pair_distances = {}
     for group in groups:
-        if group.get("kind") != "verified_bridge":
+        if not group.get("verified_correspondences"):
             continue
         runs = _split_contiguous(group["frame_indices"])
         if len(runs) != 2:

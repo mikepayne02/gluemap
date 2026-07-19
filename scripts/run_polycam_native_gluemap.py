@@ -5,14 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from gluemap.controllers.gluemap_impl import GluemapPipeline
 from gluemap.controllers.star_inference import run_star_inference
 from gluemap.datasets.polycam_native import PolycamNativeStarDataset
+from gluemap.estimators.group_pose_constraints import (
+    build_group_fragment_constraints,
+    build_group_pose_constraints,
+)
 
 
 def main() -> None:
@@ -34,7 +40,16 @@ def main() -> None:
     )
     parser.add_argument("--max-neighbors", type=int, default=25)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--full-refinement", action="store_true")
+    parser.add_argument(
+        "--inference-only",
+        action="store_true",
+        help=(
+            "Write or resume star_result.pth, then stop before global "
+            "assembly so local groups can be validated."
+        ),
+    )
     parser.add_argument(
         "--postprocess-only",
         action="store_true",
@@ -46,10 +61,41 @@ def main() -> None:
         default="SV",
         help="Refinement tracks: SIFT+virtual or virtual depth tracks only.",
     )
+    parser.add_argument(
+        "--ba-linear-solver",
+        choices=["auto", "sparse_schur", "iterative_schur"],
+        default="auto",
+        help=(
+            "Ceres linear solver for full refinement. Direct sparse Schur is "
+            "more robust for dense overlapping-group camera graphs; auto "
+            "preserves COLMAP's default selection."
+        ),
+    )
+    parser.add_argument(
+        "--ba-filter-iterations",
+        type=int,
+        choices=[1, 2, 3],
+        default=3,
+        help=(
+            "Bundle-adjustment/filter passes per refinement iteration. "
+            "Reduce only when stricter pruning leaves a rank-deficient solve."
+        ),
+    )
     args_cli = parser.parse_args()
+    if args_cli.inference_only and (
+        args_cli.postprocess_only or args_cli.full_refinement
+    ):
+        parser.error(
+            "--inference-only cannot be combined with postprocessing options"
+        )
 
     output = args_cli.output_directory.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    random.seed(args_cli.random_seed)
+    np.random.seed(args_cli.random_seed)
+    torch.manual_seed(args_cli.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args_cli.random_seed)
     args = SimpleNamespace(
         chosen_model=args_cli.backend,
         path_feedforward=(
@@ -99,6 +145,8 @@ def main() -> None:
         # are placeholders, not observations. Refine using genuine SIFT tracks
         # and MapAnything's depth-derived virtual tracks only.
         track_mode=args_cli.track_mode,
+        ba_linear_solver=args_cli.ba_linear_solver,
+        ba_filter_iterations=args_cli.ba_filter_iterations,
     )
     dataset = PolycamNativeStarDataset(
         args,
@@ -110,6 +158,11 @@ def main() -> None:
         manifest_start=args_cli.manifest_start,
         manifest_end=args_cli.manifest_end,
     )
+    checkpoint_path = output / "star_result.pth"
+    if args_cli.postprocess_only and not checkpoint_path.is_file():
+        parser.error(
+            f"--postprocess-only requires an existing {checkpoint_path}"
+        )
     predictions, star_timing = run_star_inference(
         args,
         dataset,
@@ -129,13 +182,87 @@ def main() -> None:
             ]
     torch.cuda.empty_cache()
 
+    if args_cli.inference_only:
+        print(
+            json.dumps(
+                {
+                    "backend": args_cli.backend,
+                    "frames": dataset.N,
+                    "stars": len(dataset),
+                    "completed_inference_batches": len(
+                        predictions.get("indexes", [])
+                    ),
+                    "checkpoint": str(checkpoint_path),
+                    "star_timing": star_timing,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    verified_loop_edges = getattr(dataset, "group_verified_loop_edges", set())
+    temporal_pose_diagnostics = build_group_pose_constraints(
+        predictions,
+        num_images=dataset.N,
+        trusted_loop_edges=verified_loop_edges,
+        preferred_temporal_groups=getattr(
+            dataset, "group_preferred_temporal_groups", {}
+        ),
+    )
+    temporal_constraints = [
+        constraint
+        for constraint in temporal_pose_diagnostics
+        if constraint["kind"] == "mapanything_temporal"
+    ]
+    fragment_constraints = build_group_fragment_constraints(
+        predictions, num_images=dataset.N
+    )
+    recovery_constraints = []
+    for constraint in temporal_constraints:
+        if not constraint["preferred_group_override"]:
+            continue
+        recovery_constraints.append(
+            {**constraint, "kind": "mapanything_recovery_temporal"}
+        )
+    predictions["pose_constraints"] = [
+        *fragment_constraints,
+        *recovery_constraints,
+    ]
+    constraint_summary = {
+        "source": "overlapping_mapanything_group_fragments",
+        "arkit_used": False,
+        "fragment_constraints": len(fragment_constraints),
+        "temporal_diagnostic_pairs": len(temporal_constraints),
+        "recovery_temporal_constraints": len(recovery_constraints),
+        "verified_loop_constraints": (
+            len(temporal_pose_diagnostics) - len(temporal_constraints)
+        ),
+        "single_group_temporal_pairs": sum(
+            constraint["candidate_count"] == 1
+            for constraint in temporal_constraints
+        ),
+        "preferred_group_temporal_pairs": sum(
+            constraint["preferred_group_override"]
+            for constraint in temporal_constraints
+        ),
+        "ambiguous_temporal_pairs": [
+            [constraint["first"], constraint["second"]]
+            for constraint in temporal_constraints
+            if constraint["candidate_count"] > 1
+            and constraint["agreement_fraction"] < 0.51
+        ],
+    }
+    (output / "group_pose_constraint_summary.json").write_text(
+        json.dumps(constraint_summary, indent=2) + "\n", encoding="utf-8"
+    )
+
     dataset_pair = SimpleNamespace(
         intrinsics_mapping=dataset.intrinsics_mapping,
         known_intrinsics=dataset.known_intrinsics,
         pose_priors_c2w=dataset.pose_priors_c2w,
         camera_model=dataset.camera_model,
         sequential_edges=dataset.sequential_edges,
-        trusted_loop_edges=getattr(dataset, "trusted_loop_edges", set()),
+        trusted_loop_edges=verified_loop_edges,
         trajectory_break_edges=getattr(
             dataset, "trajectory_break_edges", set()
         ),
@@ -163,6 +290,8 @@ def main() -> None:
     summary = {
         "backend": args_cli.backend,
         "track_mode": args_cli.track_mode,
+        "ba_linear_solver": args_cli.ba_linear_solver,
+        "ba_filter_iterations": args_cli.ba_filter_iterations,
         "pose_conditioning": conditioned_groups > 0,
         "pose_conditioned_groups": conditioned_groups,
         "arkit_optimization_prior": False,

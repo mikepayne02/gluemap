@@ -371,13 +371,14 @@ def run_refinement_pipeline(
     # Step 4: Configure bundle adjustment
     ba_options = IterativeBAOptions(
         max_ba_iterations=200,
-        max_filter_iterations=3,
+        max_filter_iterations=getattr(args, "ba_filter_iterations", 3),
         normalized_reproj_threshold=1e-2,
         min_track_length=2,
         fix_rotations_first_pass=False,
         fix_intrinsics=getattr(args, "fix_intrinsics", False),
         pose_priors=pose_priors,
         gravity_priors=gravity_priors,
+        linear_solver_type=getattr(args, "ba_linear_solver", "auto"),
     )
 
     # Step 5: Build reconstruction from current data

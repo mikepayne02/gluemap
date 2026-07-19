@@ -333,18 +333,11 @@ class GlobalGluer:
     def _refine_graph_structure(
         self, predictions_dict: dict
     ) -> tuple[dict, set[tuple[int, int]]]:
-        """Suppress weak/inconsistent edges and connect any missing components.
+        """Suppress weak/inconsistent edges and validate graph connectivity.
 
         Modifies ``predictions_dict`` in place (populates ``scores``, zeros
         out ``pose_scores`` for inconsistent edges, prunes invisible pairs).
         """
-        if "pose_constraints" in predictions_dict:
-            valid_edges = {
-                (constraint["first"], constraint["second"])
-                for constraint in iter_pose_constraints(predictions_dict)
-            }
-            return predictions_dict, valid_edges
-
         predictions_dict["scores"] = {}
         for idx in range(len(predictions_dict["indexes"])):
             predictions_dict["scores"][idx] = torch.where(
@@ -352,20 +345,53 @@ class GlobalGluer:
                 predictions_dict["vis"][idx],
                 0.0,
             )
+
+        if "pose_constraints" in predictions_dict:
+            valid_edges = {
+                (constraint["first"], constraint["second"])
+                for constraint in iter_pose_constraints(predictions_dict)
+            }
+            if self.require_complete_support:
+                self._require_connected_camera_graph(valid_edges)
+            return predictions_dict, valid_edges
         # Perform two way check for filtering simple outliers
         self._filter_inconsistent_edges(predictions_dict)
 
         # First, we want to collect the valid edges
         valid_edges = self._collect_valid_edges(predictions_dict)
 
-        # Then, connect the missing edges
-        self._connect_missing(valid_edges, predictions_dict)
+        if self.require_complete_support:
+            self._require_connected_camera_graph(valid_edges)
+            self._suppress_weak_pose_relations(predictions_dict)
+        else:
+            self._connect_missing(valid_edges, predictions_dict)
 
         # Prune invisible pairs
         if "pose_constraints" not in predictions_dict:
             self._prune_invisible_pairs(predictions_dict)
 
         return predictions_dict, valid_edges
+
+    def _require_connected_camera_graph(
+        self, valid_edges: set[tuple[int, int]]
+    ) -> None:
+        graph = nx.Graph()
+        graph.add_nodes_from(range(self.N))
+        graph.add_edges_from(valid_edges)
+        components = list(nx.connected_components(graph))
+        if len(components) != 1:
+            component_sizes = sorted(
+                (len(component) for component in components), reverse=True
+            )
+            raise RuntimeError(
+                "Confident MapAnything relationships do not connect all "
+                f"cameras; component sizes: {component_sizes[:20]}"
+            )
+
+    def _suppress_weak_pose_relations(self, predictions_dict: dict) -> None:
+        """Remove sub-threshold relations from the global pose-graph copy."""
+        for scores in predictions_dict["pose_scores"]:
+            scores[scores <= self.valid_threshold_pose] = 0.0
 
     def _filter_inconsistent_edges(self, predictions_dict: dict) -> None:
         """Zero out ``pose_scores`` for edges whose two directions disagree.
@@ -802,8 +828,8 @@ class GlobalGluer:
                 if not constraint["active"]:
                     continue
                 if constraint["kind"] in {
-                    "trajectory_odometry",
-                    "trajectory_rotation_bridge",
+                    "mapanything_temporal",
+                    "mapanything_recovery_temporal",
                 }:
                     continue
                 first, second = constraint["first"], constraint["second"]

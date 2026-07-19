@@ -103,19 +103,22 @@ def _add_star_edge_error(
     """
     center = -1
     if "pose_constraints" in predictions_dict:
-        trajectory_scale = np.ones((1,), dtype=np.float64)
-        predictions_dict["trajectory_scale"] = trajectory_scale
         for constraint in iter_pose_constraints(predictions_dict):
-            if constraint["kind"] == "trajectory_rotation_bridge":
-                continue
             star_index = constraint["star_index"]
+            if star_index is None:
+                raise ValueError(
+                    "Explicit group constraints require a MapAnything group"
+                )
             first = constraint["first"]
             second = constraint["second"]
             relative_pose = constraint["pose"].cpu().double()
             observation = (
                 -global_rotations[second].T @ relative_pose[:3, 3:].numpy()
             )
-            if constraint["kind"] == "trajectory_odometry":
+            if constraint["kind"] in {
+                "mapanything_temporal",
+                "mapanything_recovery_temporal",
+            }:
                 loss = None
             else:
                 loss = pyceres.LossFunction(
@@ -126,18 +129,13 @@ def _add_star_edge_error(
                     }
                 )
             cost = pygluemap.PairwiseDirectionError(observation)
-            scale = (
-                trajectory_scale
-                if star_index is None
-                else global_scales[star_index]
-            )
             prob.add_residual_block(
                 cost,
                 loss,
                 [
                     global_centers[first],
                     global_centers[second],
-                    scale,
+                    global_scales[star_index],
                 ],
             )
             costs.append(cost)
@@ -146,8 +144,6 @@ def _add_star_edge_error(
             if center < 0:
                 prob.set_parameter_block_constant(global_centers[first])
                 center = first
-        if prob.has_parameter_block(trajectory_scale):
-            prob.set_parameter_block_constant(trajectory_scale)
         return center
 
     for idx_star in range(num_ministar):

@@ -85,3 +85,39 @@ def test_partial_checkpoint_resumes_only_missing_indices(tmp_path, monkeypatch):
     assert timing["num_batches"] == 5
     assert (tmp_path / "star_result.pth").is_file()
     assert not partial_path.exists()
+
+
+def test_partial_checkpoint_restores_dataset_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    args = SimpleNamespace(
+        curr_path=str(tmp_path),
+        temp_path=str(tmp_path / "tmp"),
+        distributed=False,
+        num_workers=0,
+        batch_size=1,
+        force_load=False,
+        rerun_from=None,
+        resume_partial=True,
+        checkpoint_every=0,
+    )
+    pipeline = _CheckpointPipeline(
+        args,
+        world_size=1,
+        rank=0,
+        file_name="star_result.pth",
+        device="cpu",
+        dtype=torch.float32,
+    )
+    pipeline._save_partial_checkpoint(
+        str(tmp_path / "star_result.pth.partial"),
+        all_outputs=[{"value": 0}, {"value": 2}, {"value": 4}],
+        all_indices=[0, 2, 4],
+        batch_times=[],
+        extra_timings={},
+    )
+
+    outputs, _ = pipeline.run(_IndexDataset())
+
+    assert pipeline.executed == [1, 3]
+    assert outputs["value"] == [0, 1, 2, 3, 4]
+    assert outputs["star_indexes"] == [0, 1, 2, 3, 4]

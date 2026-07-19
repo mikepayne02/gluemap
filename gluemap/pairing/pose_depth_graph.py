@@ -246,6 +246,20 @@ def frontend_edge_is_group_evidence(edge: dict) -> bool:
     return visual_inliers >= 15 and visual_ratio >= 0.30
 
 
+def exclude_group_evidence_pairs(
+    edges: list[dict], excluded_pairs: set[tuple[int, int]]
+) -> tuple[list[dict], int]:
+    """Remove audited false correspondences before building any groups."""
+    normalized = {tuple(sorted(map(int, pair))) for pair in excluded_pairs}
+    kept = [
+        edge
+        for edge in edges
+        if tuple(sorted((int(edge["first"]), int(edge["second"]))))
+        not in normalized
+    ]
+    return kept, len(edges) - len(kept)
+
+
 def build_verified_bridge_groups(
     indices: list[int], verified_edges: list[dict], *, group_size: int = 64
 ) -> list[dict]:
@@ -336,6 +350,241 @@ def build_verified_bridge_groups(
             }
         )
     return groups
+
+
+def select_centered_frames(
+    indices: list[int], center: int, view_count: int
+) -> list[int]:
+    """Return a deterministic temporal window, shifted at dataset boundaries."""
+    if view_count < 2:
+        raise ValueError("Recovery groups require at least two views")
+    ordered = sorted(map(int, indices))
+    if center not in set(ordered):
+        raise ValueError(f"Recovery center {center} is not an included frame")
+    if view_count > len(ordered):
+        raise ValueError(
+            f"Recovery view count {view_count} exceeds {len(ordered)} frames"
+        )
+    center_position = ordered.index(center)
+    start = center_position - view_count // 2
+    start = min(max(start, 0), len(ordered) - view_count)
+    return ordered[start : start + view_count]
+
+
+def select_sparse_pose_frames(
+    members: list[int], anchor: int, *, radius: int, maximum: int
+) -> list[int]:
+    """Select a deterministic local subset for optional pose conditioning."""
+    if maximum < 1:
+        raise ValueError("Pose conditioning requires at least one view")
+    local = sorted(frame for frame in members if abs(frame - anchor) <= radius)
+    if anchor not in local:
+        local.append(anchor)
+        local.sort()
+    if len(local) > maximum:
+        positions = np.linspace(0, len(local) - 1, maximum).round().astype(int)
+        local = [local[position] for position in positions]
+        if anchor not in local:
+            local[0] = anchor
+    return list(dict.fromkeys([anchor, *local]))
+
+
+def apply_group_recovery_policy(
+    groups: list[dict], policy: dict, valid_indices: set[int]
+) -> list[dict]:
+    """Add balanced bridge groups around independently verified revisits.
+
+    A recovery candidate supplies one or more image-verified pairs joining two
+    visits to the same place.  Half of the views come from temporal context
+    around each side of the revisit.  This avoids both failure modes of the
+    generic graph cover: a lopsided group with only a few views from one visit,
+    and a large contiguous window that never jointly observes the revisit.
+    """
+    if int(policy.get("schema_version", 0)) != 1:
+        raise ValueError("Unsupported group recovery policy schema")
+    if policy.get("layout") != "balanced_pair_context":
+        raise ValueError("Recovery policy must use balanced_pair_context")
+    views_per_side = int(policy.get("views_per_side", 0))
+    if views_per_side < 2:
+        raise ValueError("Recovery policy requires at least two views per side")
+
+    pose_policy = policy.get("pose_conditioning", {"mode": "none"})
+    pose_mode = pose_policy.get("mode", "none")
+    if pose_mode not in {"none", "sparse_local"}:
+        raise ValueError(f"Unsupported recovery pose mode: {pose_mode}")
+
+    existing_names = {group["name"] for group in groups}
+    ordered_indices = sorted(valid_indices)
+    additions = []
+    for candidate in policy.get("candidates", []):
+        name = str(candidate["name"])
+        if name in existing_names:
+            raise ValueError(f"Duplicate recovery group name: {name}")
+
+        evidence_pairs = [
+            [int(pair[0]), int(pair[1])]
+            for pair in candidate.get("evidence_pairs", [])
+        ]
+        if not evidence_pairs:
+            raise ValueError(f"Recovery group {name} has no evidence pairs")
+        if any(len(pair) != 2 for pair in evidence_pairs):
+            raise ValueError(f"Recovery group {name} has a malformed pair")
+        evidence_frames = {frame for pair in evidence_pairs for frame in pair}
+        missing_evidence = sorted(evidence_frames - valid_indices)
+        if missing_evidence:
+            raise ValueError(
+                f"Recovery group {name} uses excluded frames: "
+                f"{missing_evidence}"
+            )
+
+        first_center = int(
+            candidate.get(
+                "first_center_frame",
+                round(float(np.median([pair[0] for pair in evidence_pairs]))),
+            )
+        )
+        second_center = int(
+            candidate.get(
+                "second_center_frame",
+                round(float(np.median([pair[1] for pair in evidence_pairs]))),
+            )
+        )
+        if first_center == second_center:
+            raise ValueError(
+                f"Recovery group {name} has identical visit centers"
+            )
+        first_members = select_centered_frames(
+            ordered_indices, first_center, views_per_side
+        )
+        second_members = select_centered_frames(
+            ordered_indices, second_center, views_per_side
+        )
+        members = list(dict.fromkeys([*first_members, *second_members]))
+        expected_views = 2 * views_per_side
+        if len(members) != expected_views:
+            raise ValueError(
+                f"Recovery group {name} visit contexts overlap: "
+                f"{len(members)} != {expected_views}"
+            )
+        if not evidence_frames <= set(members):
+            raise ValueError(
+                f"Recovery group {name} context omits an evidence frame"
+            )
+        anchor = int(candidate.get("anchor_frame", evidence_pairs[0][0]))
+        if anchor not in members:
+            raise ValueError(
+                f"Recovery anchor for {name} is outside its visit contexts"
+            )
+        conditioned = []
+        if pose_mode == "sparse_local":
+            conditioned = select_sparse_pose_frames(
+                members,
+                anchor,
+                radius=int(pose_policy.get("anchor_radius", 12)),
+                maximum=int(pose_policy.get("max_views", 8)),
+            )
+        groups.append(
+            {
+                "name": name,
+                "kind": "balanced_revisit_recovery",
+                "anchor_frame": anchor,
+                "frame_indices": members,
+                "verified_correspondences": evidence_pairs,
+                "pose_conditioned_frames": conditioned,
+                "expected_view_count": len(members),
+                "pose_modes": [pose_mode],
+            }
+        )
+        existing_names.add(name)
+        additions.append(
+            {
+                "name": name,
+                "anchor_frame": anchor,
+                "view_count": len(members),
+                "views_per_side": views_per_side,
+                "visit_ranges": [
+                    [first_members[0], first_members[-1]],
+                    [second_members[0], second_members[-1]],
+                ],
+                "evidence_pairs": evidence_pairs,
+                "pose_conditioned_frames": conditioned,
+            }
+        )
+
+    for candidate in policy.get("local_candidates", []):
+        name = str(candidate["name"])
+        if name in existing_names:
+            raise ValueError(f"Duplicate recovery group name: {name}")
+        view_count = int(candidate.get("view_count", 64))
+        center = int(candidate["center_frame"])
+        members = select_centered_frames(ordered_indices, center, view_count)
+        anchor = int(candidate.get("anchor_frame", center))
+        if anchor not in members:
+            raise ValueError(
+                f"Recovery anchor for {name} is outside its temporal context"
+            )
+        depth_excluded = list(
+            dict.fromkeys(map(int, candidate.get("depth_excluded_frames", [])))
+        )
+        if not set(depth_excluded) <= set(members):
+            raise ValueError(
+                f"Recovery group {name} excludes depth outside its members"
+            )
+        local_pose_policy = candidate.get(
+            "pose_conditioning", {"mode": "none"}
+        )
+        local_pose_mode = local_pose_policy.get("mode", "none")
+        if local_pose_mode not in {"none", "sparse_local", "full_local"}:
+            raise ValueError(
+                f"Unsupported local recovery pose mode: {local_pose_mode}"
+            )
+        conditioned = []
+        if local_pose_mode == "sparse_local":
+            conditioned = select_sparse_pose_frames(
+                members,
+                anchor,
+                radius=int(local_pose_policy.get("anchor_radius", 12)),
+                maximum=int(local_pose_policy.get("max_views", 8)),
+            )
+        elif local_pose_mode == "full_local":
+            conditioned = list(members)
+        temporal_ranges = [
+            [int(bounds[0]), int(bounds[1])]
+            for bounds in candidate.get("authoritative_temporal_ranges", [])
+        ]
+        if any(
+            start >= end or not {start, end} <= set(members)
+            for start, end in temporal_ranges
+        ):
+            raise ValueError(
+                f"Recovery group {name} has an invalid temporal range"
+            )
+        groups.append(
+            {
+                "name": name,
+                "kind": "local_temporal_recovery",
+                "anchor_frame": anchor,
+                "frame_indices": members,
+                "depth_excluded_frames": depth_excluded,
+                "pose_conditioned_frames": conditioned,
+                "authoritative_temporal_ranges": temporal_ranges,
+                "expected_view_count": len(members),
+                "pose_modes": [local_pose_mode],
+            }
+        )
+        existing_names.add(name)
+        additions.append(
+            {
+                "name": name,
+                "anchor_frame": anchor,
+                "view_count": len(members),
+                "temporal_range": [members[0], members[-1]],
+                "depth_excluded_frames": depth_excluded,
+                "authoritative_temporal_ranges": temporal_ranges,
+                "pose_conditioned_frames": conditioned,
+            }
+        )
+    return additions
 
 
 def build_graph_groups(

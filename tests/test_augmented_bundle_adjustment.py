@@ -12,11 +12,51 @@ import numpy as np
 import pyceres
 import pycolmap
 import pygluemap
+import pytest
 
+from gluemap.controllers.augmented_bundle_adjustment import (
+    _observation_removal_fraction,
+)
 from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
+
+
+def test_observation_removal_fraction_uses_observations_not_points():
+    assert _observation_removal_fraction(17_000, 3_700_000) == pytest.approx(
+        17_000 / 3_717_000
+    )
+    assert _observation_removal_fraction(0, 0) == 0.0
+
+
+@pytest.mark.parametrize("solver", ["sparse_schur", "iterative_schur"])
+def test_bundle_adjustment_accepts_explicit_schur_solver(solver):
+    reconstruction = create_synthetic_reconstruction(
+        num_frames=3, num_points3D=10, seed=3
+    )
+    _, _, summary = bundle_adjustment(
+        reconstruction,
+        None,
+        negative_depth_observations={},
+        max_num_iterations=0,
+        linear_solver_type=solver,
+    )
+    assert summary.num_residuals > 0
+
+
+def test_bundle_adjustment_rejects_unknown_linear_solver():
+    reconstruction = create_synthetic_reconstruction(
+        num_frames=3, num_points3D=10, seed=4
+    )
+    with pytest.raises(ValueError, match="linear_solver_type"):
+        bundle_adjustment(
+            reconstruction,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=0,
+            linear_solver_type="mystery",
+        )
 
 
 def test_camera_pose_prior_cost_is_zero_at_target():

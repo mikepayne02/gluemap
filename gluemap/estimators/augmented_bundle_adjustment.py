@@ -383,6 +383,7 @@ def bundle_adjustment(
     fix_intrinsics: bool = False,
     pose_priors: dict[str, dict[str, np.ndarray]] | None = None,
     gravity_priors: dict[str, dict[str, np.ndarray]] | None = None,
+    linear_solver_type: str = "auto",
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -434,7 +435,22 @@ def bundle_adjustment(
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
-    ba_options.ceres.auto_select_solver_type = True
+    solver_types = {
+        "sparse_schur": pyceres.LinearSolverType.SPARSE_SCHUR,
+        "iterative_schur": pyceres.LinearSolverType.ITERATIVE_SCHUR,
+    }
+    if linear_solver_type == "auto":
+        ba_options.ceres.auto_select_solver_type = True
+    elif linear_solver_type in solver_types:
+        ba_options.ceres.auto_select_solver_type = False
+        ba_options.ceres.solver_options.linear_solver_type = solver_types[
+            linear_solver_type
+        ]
+    else:
+        raise ValueError(
+            "linear_solver_type must be one of auto, sparse_schur, "
+            f"iterative_schur; got {linear_solver_type!r}"
+        )
     ba_options.ceres.loss_function_type = _pycolmap_loss_type(loss_type_normal)
 
     ba_config = pycolmap.BundleAdjustmentConfig()
@@ -503,6 +519,11 @@ def bundle_adjustment(
 
     # --- Solve -------------------------------------------------------------
     solver_options = ba_options.ceres.create_solver_options(ba_config, problem)
+    logger.info(
+        "Ceres linear solver: requested=%s, selected=%s",
+        linear_solver_type,
+        solver_options.linear_solver_type,
+    )
     summary = pyceres.SolverSummary()
     pygluemap.solve_cuda(solver_options, problem, summary)
     logger.info(summary.BriefReport())

@@ -184,7 +184,6 @@ class BaseInferencePipeline(abc.ABC):
             key: list(values)
             for key, values in initial_state.get("extra_timings", {}).items()
         }
-
         t0_load = time.perf_counter()
         models = self._load_models()
         t_model_load = time.perf_counter() - t0_load
@@ -281,7 +280,28 @@ class BaseInferencePipeline(abc.ABC):
                 data_list, index_mapping, len(dataset)
             )
         else:
-            global_outputs = local_outputs
+            expected = list(range(len(dataset)))
+            if sorted(all_indices) != expected:
+                raise RuntimeError(
+                    "Single-process inference did not produce exactly one "
+                    "output per dataset item"
+                )
+            if all_indices == expected:
+                global_outputs = local_outputs
+            else:
+                positions = {
+                    index: position
+                    for position, index in enumerate(all_indices)
+                }
+                order = [positions[index] for index in expected]
+                global_outputs = {}
+                for key, values in local_outputs.items():
+                    if isinstance(values, list):
+                        global_outputs[key] = [
+                            values[position] for position in order
+                        ]
+                    else:
+                        global_outputs[key] = values[order]
 
         return self._postprocess_global_outputs(global_outputs, dataset)
 

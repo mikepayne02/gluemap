@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "layout": "balanced_pair_context",
+  "views_per_side": 32,
+  "pose_conditioning": {
+    "mode": "none"
+  },
+  "excluded_evidence_pairs": [[2232, 3088]],
+  "candidates": [
+    {
+      "name": "upper_stair_bridge_anchor_1001",
+      "evidence_pairs": [[1000, 2137], [1001, 2137]],
+      "anchor_frame": 1001
+    },
+    {
+      "name": "upper_stair_bridge_anchor_2137",
+      "evidence_pairs": [[1000, 2137], [1001, 2137]],
+      "anchor_frame": 2137
+    },
+    {
+      "name": "main_to_basement_transition_anchor_2220",
+      "evidence_pairs": [
+        [2218, 3088],
+        [2219, 3088],
+        [2220, 3088],
+        [2221, 3088]
+      ],
+      "anchor_frame": 2220
+    },
+    {
+      "name": "main_to_basement_transition_anchor_3088",
+      "evidence_pairs": [
+        [2218, 3088],
+        [2219, 3088],
+        [2220, 3088],
+        [2221, 3088]
+      ],
+      "anchor_frame": 3088
+    },
+    {
+      "name": "basement_stair_bridge_anchor_3034",
+      "evidence_pairs": [[2379, 3034], [2380, 3034]],
+      "anchor_frame": 3034
+    }
+  ],
+  "local_candidates": [
+    {
+      "name": "rgb_depth_mismatch_recovery_3080",
+      "center_frame": 3088,
+      "view_count": 64,
+      "anchor_frame": 3080,
+      "depth_excluded_frames": [3081, 3082, 3083],
+      "authoritative_temporal_ranges": [[3080, 3084]],
+      "pose_conditioning": {"mode": "none"}
+    },
+    {
+      "name": "upper_stair_motion_recovery_970",
+      "center_frame": 970,
+      "view_count": 64,
+      "anchor_frame": 970,
+      "authoritative_temporal_ranges": [[966, 978]],
+      "pose_conditioning": {"mode": "full_local"}
+    }
+  ]
+}

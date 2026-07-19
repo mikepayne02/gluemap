@@ -77,8 +77,6 @@ def _initialize_group_cover(
     graph.add_nodes_from(global_rotations)
     displacements = {}
     for constraint in iter_pose_constraints(predictions_dict):
-        if constraint["kind"] == "trajectory_rotation_bridge":
-            continue
         first, second = constraint["first"], constraint["second"]
         relative_pose = constraint["pose"].cpu().double()
         displacement = (

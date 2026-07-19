@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from scipy.spatial.transform import Rotation
 
@@ -14,6 +15,59 @@ from gluemap.controllers.global_merger import (
     _fill_missing_centers_temporally,
     _fill_missing_rotations_temporally,
 )
+
+
+def test_production_graph_rejects_disconnected_confident_edges():
+    extrinsics = torch.eye(4)[:3].reshape(1, 1, 3, 4).repeat(1, 2, 1, 1)
+    predictions = {
+        "indexes": [[0, 1]],
+        "pose_scores": [torch.ones(1, 2)],
+        "extrinsics": [extrinsics],
+        "vis": [torch.ones(1, 2, 1)],
+    }
+    gluer = GlobalGluer(
+        SimpleNamespace(
+            valid_pose_threshold=0.05,
+            is_sequential=False,
+            require_complete_camera_support=True,
+        )
+    )
+    gluer.N = 3
+
+    with pytest.raises(RuntimeError, match="do not connect all cameras"):
+        gluer._refine_graph_structure(predictions)
+
+
+def test_production_graph_removes_weak_relations_after_connectivity_check(
+    monkeypatch,
+):
+    extrinsics = torch.eye(4)[:3].reshape(1, 1, 3, 4)
+    predictions = {
+        "indexes": [[0, 1, 2], [1, 2]],
+        "pose_scores": [
+            torch.tensor([[1.0, 1.0, 0.01]]),
+            torch.ones(1, 2),
+        ],
+        "extrinsics": [
+            extrinsics.repeat(1, 3, 1, 1),
+            extrinsics.repeat(1, 2, 1, 1),
+        ],
+        "vis": [torch.ones(1, 3, 1), torch.ones(1, 2, 1)],
+    }
+    gluer = GlobalGluer(
+        SimpleNamespace(
+            valid_pose_threshold=0.05,
+            is_sequential=False,
+            require_complete_camera_support=True,
+        )
+    )
+    gluer.N = 3
+    monkeypatch.setattr(gluer, "_prune_invisible_pairs", lambda *args: None)
+
+    refined, edges = gluer._refine_graph_structure(predictions)
+
+    assert edges == {(0, 1), (1, 2)}
+    assert refined["pose_scores"][0][0, 2] == 0
 
 
 def test_metric_groups_ignore_mst_scale_ratios(monkeypatch):
@@ -57,7 +111,7 @@ def test_metric_groups_ignore_mst_scale_ratios(monkeypatch):
     assert captured == {0: 1.0, 1: 1.0}
 
 
-def test_rotation_filter_never_drops_adjacent_trajectory_odometry():
+def test_rotation_filter_never_drops_mapanything_temporal_chain():
     quarter_turn = torch.from_numpy(
         Rotation.from_euler("z", 90, degrees=True).as_matrix()
     ).double()
@@ -69,7 +123,7 @@ def test_rotation_filter_never_drops_adjacent_trajectory_odometry():
                 "second": 1,
                 "pose": pose,
                 "score": 1.0,
-                "kind": "trajectory_odometry",
+                "kind": "mapanything_temporal",
                 "active": True,
             },
             {
@@ -77,7 +131,7 @@ def test_rotation_filter_never_drops_adjacent_trajectory_odometry():
                 "second": 1,
                 "pose": pose,
                 "score": 1.0,
-                "kind": "verified_loop",
+                "kind": "mapanything_verified_loop",
                 "active": True,
             },
         ]
@@ -94,6 +148,62 @@ def test_rotation_filter_never_drops_adjacent_trajectory_odometry():
 
     assert predictions["pose_constraints"][0]["active"]
     assert not predictions["pose_constraints"][1]["active"]
+
+
+def test_explicit_camera_graph_still_prepares_virtual_track_scores():
+    predictions = {
+        "indexes": [[0, 1]],
+        "vis": [torch.tensor([[[0.1], [0.01]]])],
+        "pose_constraints": [
+            {
+                "first": 0,
+                "second": 1,
+                "pose": torch.eye(4)[:3],
+                "score": 1.0,
+                "kind": "mapanything_temporal",
+                "active": True,
+            }
+        ],
+    }
+    gluer = GlobalGluer(
+        SimpleNamespace(valid_pose_threshold=0.05, is_sequential=False)
+    )
+    gluer.N = 2
+
+    refined, edges = gluer._refine_graph_structure(predictions)
+
+    assert edges == {(0, 1)}
+    torch.testing.assert_close(
+        refined["scores"][0], torch.tensor([[[0.1], [0.0]]])
+    )
+
+
+def test_production_explicit_graph_rejects_unsupported_camera():
+    predictions = {
+        "indexes": [[0, 1]],
+        "vis": [torch.ones(1, 2, 1)],
+        "pose_constraints": [
+            {
+                "first": 0,
+                "second": 1,
+                "pose": torch.eye(4)[:3],
+                "score": 1.0,
+                "kind": "mapanything_group_fragment",
+                "active": True,
+            }
+        ],
+    }
+    gluer = GlobalGluer(
+        SimpleNamespace(
+            valid_pose_threshold=0.05,
+            is_sequential=False,
+            require_complete_camera_support=True,
+        )
+    )
+    gluer.N = 3
+
+    with pytest.raises(RuntimeError, match="do not connect all cameras"):
+        gluer._refine_graph_structure(predictions)
 
 
 def test_missing_centers_are_linearly_interpolated():

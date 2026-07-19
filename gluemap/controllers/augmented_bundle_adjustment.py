@@ -248,8 +248,21 @@ class IterativeBAOptions:
     # Optional gravity-only camera constraints keyed by image name.
     gravity_priors: dict | None = None
 
+    # Ceres linear solver. ``auto`` delegates to COLMAP's size heuristic.
+    linear_solver_type: str = "auto"
+
     # Whether to filter virtual points same as real tracks
     filter_virtual_points: bool = True
+
+
+def _observation_removal_fraction(
+    observations_removed: int, observations_remaining: int
+) -> float:
+    """Return the fraction removed from the pre-filter observation set."""
+    observations_before_filter = observations_removed + observations_remaining
+    if observations_before_filter <= 0:
+        return 0.0
+    return observations_removed / observations_before_filter
 
 
 def prune_track_outliers(
@@ -560,12 +573,12 @@ def iterative_bundle_adjustment(
             fix_intrinsics=options.fix_intrinsics,
             pose_priors=options.pose_priors,
             gravity_priors=options.gravity_priors,
+            linear_solver_type=options.linear_solver_type,
         )
 
         # Inner loop: filter and tighten threshold when too few tracks filtered
         # (matches C++ IterativeBundleAdjustment pattern)
         logger.info("Filtering tracks by reprojection ...")
-        total_filtered = 0
         should_stop = True  # Will be set to False if enough tracks are filtered
 
         while iteration < options.max_filter_iterations:
@@ -598,23 +611,27 @@ def iterative_bundle_adjustment(
                 obs_removed_total += obs_removed
                 tracks_removed_total += tracks_removed
 
-            total_filtered += obs_removed_total
-
             logger.info(
                 f"Filtered: {obs_removed_total} observations, "
                 f"{tracks_removed_total} tracks removed"
             )
 
-            # Check if enough tracks were filtered (> convergence_threshold of
-            # combined points)
-            num_points = len(reconstruction.points3D) + (
-                len(virtual_reconstruction.points3D)
-                if virtual_reconstruction is not None
-                else 0
+            # A new solve is warranted only when filtering removed a
+            # meaningful fraction of observations. The previous comparison
+            # mixed observation and point counts, which could launch another
+            # underconstrained solve after removing well under 1% of the data.
+            remaining_real_obs, remaining_virtual_obs = _count_observations()
+            removal_fraction = _observation_removal_fraction(
+                obs_removed_total,
+                remaining_real_obs + remaining_virtual_obs,
+            )
+            logger.info(
+                "Observation removal fraction: %.4f%% (continue above %.4f%%)",
+                100.0 * removal_fraction,
+                100.0 * options.convergence_threshold,
             )
             if (
-                num_points > 0
-                and total_filtered > options.convergence_threshold * num_points
+                removal_fraction > options.convergence_threshold
             ):
                 # Enough filtered, break inner loop to run BA again
                 should_stop = False
@@ -626,7 +643,7 @@ def iterative_bundle_adjustment(
                 iteration += 1
                 if iteration < options.max_filter_iterations:
                     logger.debug(
-                        f"Low removal ({total_filtered} total), tightening "
+                        f"Low removal ({removal_fraction:.4%}), tightening "
                         f"threshold (iteration -> {iteration + 1})"
                     )
 

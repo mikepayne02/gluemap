@@ -153,6 +153,8 @@ class PolycamNativeStarDataset(BaseStarDataset):
         self.query_points = [None] * len(self.valid_edges)
         self.max_neighbors = getattr(args, "max_neighbors", 25)
         self.__post_init__()
+        self.group_depth_excluded_members = [set() for _ in self.stars]
+        self.group_preferred_temporal_groups = {}
         if group_config is not None:
             self._load_explicit_groups(group_config, manifest_to_native)
 
@@ -166,6 +168,11 @@ class PolycamNativeStarDataset(BaseStarDataset):
         stars: list[np.ndarray] = []
         names: list[str] = []
         pose_conditioned_members: list[set[int]] = []
+        depth_excluded_members: list[set[int]] = []
+        verified_group_loops: set[tuple[int, int]] = set()
+        preferred_temporal_groups: dict[
+            tuple[int, int], set[int]
+        ] = {}
         for group_index, group in enumerate(data["groups"]):
             manifest_members = list(group.get("frame_indices", []))
             for start, end in group.get("frame_ranges_inclusive", []):
@@ -191,7 +198,24 @@ class PolycamNativeStarDataset(BaseStarDataset):
                 *(index for index in native_members if index != anchor_native),
             ]
             stars.append(np.asarray(native_members, dtype=np.int64))
+            star_index = len(stars) - 1
             names.append(group.get("name", f"group_{group_index:04d}"))
+            for first, second in group.get("verified_correspondences", []):
+                first, second = int(first), int(second)
+                if (
+                    first not in manifest_to_native
+                    or second not in manifest_to_native
+                ):
+                    continue
+                pair = tuple(
+                    sorted(
+                        (
+                            manifest_to_native[first],
+                            manifest_to_native[second],
+                        )
+                    )
+                )
+                verified_group_loops.add(pair)
             conditioned_manifest = set(
                 map(int, group.get("pose_conditioned_frames", []))
             )
@@ -206,6 +230,58 @@ class PolycamNativeStarDataset(BaseStarDataset):
                     "anchor frame"
                 )
             pose_conditioned_members.append(conditioned_native)
+            excluded_depth_manifest = set(
+                map(int, group.get("depth_excluded_frames", []))
+            )
+            excluded_depth_native = {
+                manifest_to_native[manifest_index]
+                for manifest_index in excluded_depth_manifest
+                if manifest_index in manifest_to_native
+            }
+            if not excluded_depth_native <= set(native_members):
+                raise ValueError(
+                    f"Group {names[-1]} excludes depth outside its members"
+                )
+            depth_excluded_members.append(excluded_depth_native)
+            for bounds in group.get("authoritative_temporal_ranges", []):
+                if len(bounds) != 2:
+                    raise ValueError(
+                        f"Group {names[-1]} has a malformed temporal range"
+                    )
+                start, end = map(int, bounds)
+                if start >= end:
+                    raise ValueError(
+                        f"Group {names[-1]} has an invalid temporal range"
+                    )
+                for first_manifest in range(start, end):
+                    second_manifest = first_manifest + 1
+                    if (
+                        first_manifest not in manifest_to_native
+                        or second_manifest not in manifest_to_native
+                    ):
+                        raise ValueError(
+                            f"Group {names[-1]} temporal range crosses an "
+                            "excluded frame"
+                        )
+                    first_native = manifest_to_native[first_manifest]
+                    second_native = manifest_to_native[second_manifest]
+                    if {
+                        first_native,
+                        second_native,
+                    } - set(native_members):
+                        raise ValueError(
+                            f"Group {names[-1]} temporal range leaves its "
+                            "members"
+                        )
+                    pair = tuple(sorted((first_native, second_native)))
+                    if pair[1] != pair[0] + 1:
+                        raise ValueError(
+                            f"Group {names[-1]} temporal range is not "
+                            "native-consecutive"
+                        )
+                    preferred_temporal_groups.setdefault(pair, set()).add(
+                        star_index
+                    )
 
         if not stars:
             raise ValueError(f"No usable groups in {group_config}")
@@ -225,6 +301,16 @@ class PolycamNativeStarDataset(BaseStarDataset):
         self.stars = stars
         self.group_names = names
         self.group_pose_conditioned_members = pose_conditioned_members
+        self.group_depth_excluded_members = depth_excluded_members
+        self.group_verified_loop_edges = verified_group_loops
+        self.group_preferred_temporal_groups = preferred_temporal_groups
+        # SIFT remains dense along the capture path. Cross-visit SIFT is used
+        # only for loops that were deliberately placed and validated inside a
+        # joint MapAnything group; generic visual similarity can cross walls
+        # in this repetitive house interior.
+        self.refinement_edges = sorted(
+            set(self.sequential_edges) | verified_group_loops
+        )
         self.image_index_to_star_index = {
             int(star[0]): index for index, star in enumerate(stars)
         }
@@ -233,6 +319,7 @@ class PolycamNativeStarDataset(BaseStarDataset):
     def __getitem__(self, index: int) -> dict:
         batch = super().__getitem__(index)
         target_height, target_width = batch["images"].shape[-2:]
+        depth_excluded = self.group_depth_excluded_members[index]
         depths = []
         intrinsics = []
         manifest_indices = []
@@ -253,6 +340,8 @@ class PolycamNativeStarDataset(BaseStarDataset):
             )
             confidence = np.rot90(confidence, k=3).copy()
             depth[confidence < 1] = 0.0
+            if int(native_index) in depth_excluded:
+                depth.fill(0.0)
             source_width, source_height = frame["rgb_size_wh"]
             scale_x, scale_y, offset_x, offset_y = batch["images_change"][
                 local_index
